@@ -19,8 +19,8 @@ EXCLUDE_DISKS=""
 # Setup the mail header.  Replace the address with your own and modify subject line
 # if desired.
 (
-echo “To: me@myaddress.com”
-echo “Subject: SMART Drive Results for all drives”
+echo “To: hunterdp@gmail.com”
+echo “Subject: FreeNAS SMART Drive Results for all drives”
 echo “Content-Type: text/html”
 echo “MIME-Version: 1.0″
 echo ” ”
@@ -53,12 +53,11 @@ do
   fi
 
   echo "$i is a model $model with a status of $test_results and has $bad_sectors bad sectors.  Its temperature is $temp deg Celsius" >> $O_FILE    
-  echo "i = $i"
 done
 
 # Close the file and send it
 echo "</html>" >> $O_FILE
 
-#sendmail -t < ./tmp/cover.html
+sendmail -t < $O_FILE
 
 exit 0
