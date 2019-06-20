@@ -7,26 +7,30 @@
 #   sh disk_check.sh
 #
 
-echo "Starting the disck check script"
+echo $(date) "Starting the disk check script ..."
 # Set this to the location where you want to store the temporary results file.
 O_FILE=/tmp/disk_overview.html
 
 # Setup the mail header.  Replace the address with your own and modify subject line
-# if desired.
 (
 echo To: hunterdp@gmail.com
-echo Subject: FreeNAS SMART Drive Results for all drives
+echo Subject: FreeNAS SMART and Disk Summary
 echo Content-Type: text/html
 echo MIME-Version: 1.0
-echo  
-echo "<html>"
+echo "<html>" 
+echo "<title>Summary of Freenas host $host </title>"
 ) > $O_FILE
 
-# Loop through the list of disks and retrieve various information
-# Generate a list of disks on the host 
-# NB:  We could use smartctl --scan but that will not list all the disks on the sytem.
-LIST_OF_DISKS=$(geom disk list | grep Name | awk '{print $3}')
+# Print out the short status of the zpools
+echo "<h1>Zpool Summary</h1><pre>" >> $O_FILE
+zpool list -T d -v >> $O_FILE
+echo "</pre><br>" >> $O_FILE
 
+# Loop through the list of disks and retrieve various information
+DISKS=$(geom disk list | grep Name | awk '{print $3}')
+LIST_OF_DISKS=$(sort <<<"${DISKS[*]}")
+
+echo "<h1>SMARTCTL Status for Disks Found</h1>" >> $O_FILE
 echo "<table>" >> $O_FILE
 echo "<tr>" >> $O_FILE
 echo "<th>DISK</th>" >>$O_FILE
@@ -36,6 +40,7 @@ echo "<th>BAD SECTORS</th>" >> $O_FILE
 echo "<th>TEMPERATURE</th>" >> $O_FILE
 echo "</tr>" >> $O_FILE
 
+echo $(date) "Iterrating through disks..."
 for i in $LIST_OF_DISKS 
 do
   full_results=$(smartctl -a /dev/$i)
@@ -72,7 +77,8 @@ echo "</table>" >> $O_FILE
 # Close the file and send it
 echo "</html>" >> $O_FILE
 
+echo $(date) "Sending the report ..."
 sendmail -t < $O_FILE
 
-echo "Ending the disk checking script"
+echo $(date) "Ending the disk checking script"
 exit 0
