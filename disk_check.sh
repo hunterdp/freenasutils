@@ -1,81 +1,84 @@
 #!/bin/bash
-#
+# ---
 # Description:
 #   A simple script to collect some information about the disks on the freenas server.  The data
 #   is stored in a file and setup to enable mailing of the file.
 # Usage:
 #   sh disk_check.sh command arguments
 #   where:
-#     --debug 
-#     --email=email_address
-#     --help
-#     --no-mail 
-#
-echo $(date) "Starting the disk check script ..."
+#     -d                             turn on debug
+#     -e email_address               email address to send the file to
+#     -f filename                    filename to 
+#     -m y|n                         mail the file or not
+#     -s "subject"                   subject of email
+# ---
 
+# --- Modify the behavior of the script to reduce errors and make sure all variables are defined.
+
+set -e
+set -u
+set -o pipefail
 
 # --- Global Variables ---
-MAIL_FILE=true
-O_FILE=/tmp/disk_overview.html
-EMAIL_TO="hunterdp@gmail.com"
+# --- Declare all variables before being used.
+# --- 
+
+DEBUG=1
+MAIL_FILE="n"
+O_FILE="/tmp/disk_overview.html"
+EMAIL_TO="user@company.com"
 HOST_NAME=$(hostname -s | tr '[:lower:]' '[:upper:]')
 MAIL_SUBJECT="FreeNAS SMART and Disk Summary for $HOST_NAME"
 DISKS=$(geom disk list | grep Name | awk '{print $3}')
 LIST_OF_DISKS=$(sort <<<"${DISKS[*]}")
-
-# --- Parse the command line arguments ---
-
-while getopts :dne:
-do 
-  case $name in
-    d )  
-        DEBUG=true
-        ;;
-    e ) 
-        EMAIL_TO="$OPTARG"
-        ;;
-    n )
-        MAIL_FILE=false
-        ;;
-    \? )
-        printf "Usage: %s: [-d] [-e email address] [-n] args \n" $0
-        exit 1
-        ;;
-    : ) 
-        echo "Invalid option: $OPTARG requires an argument" 1>&2
-  esac
-done
-shift $((OPTIND -1))
-
-echo $(date) "$DEBUG == $EMAIL_TO == $MAIL_FILE"
-
-#for argument in "$@"
-#do
-#  if [ "$argument" == "--debug" ]
-#  then
-#    DEBUG=1
-#
-#  elif [ "$argument" == "--no-mail" ]
-#  then
-#    MAIL_FILE=false
-#
-#  elif [ "$argument" == "--help" ] || [ "$argument" == "-h" ]
-#  then
-#    printf "%s\n" "usage: disk_check.sh command args"
-#    printf "%s\n\n" "Where:"
-#    printf "\t%s\n" "--debug"
-#    printf "\t%s\n" "--help or -h"
-#    printf "\t%s\n" "--no-mail"
-#    printf "\n"
-#    exit 0;
-#  fi
-#done
 
 # --- Useful functions ---
 print_td () { echo "<td>$1</td>" >> ${O_FILE}; }
 print_raw () { echo $1 >> ${O_FILE}; }
 start_row () { echo "<tr>" >> ${O_FILE}; }
 end_row () { echo "</tr>" >> ${O_FILE}; }
+DEBUG() { 
+if [ $DEBUG -eq 0 ] 
+  then printf "%s" "$1" 
+  fi; 
+}
+
+
+# --- Parse the command line arguments ---
+
+DEBUG "$(date) Starting the disk check script ..."
+
+while getopts 'de:f:m:s:' arg; do
+  case $arg in
+    d)
+        DEBUG=0
+        ;;
+    e)
+        EMAIL_TO="$OPTARG"
+        ;;
+    f)
+        O_FILE="$OPTARG"
+        ;;
+    m)
+        MAIL_FILE="$OPTARG"
+        ;;
+    s)
+        EMAIL_SUBJECT="$OPTARG"
+        ;;
+    ?)
+        printf "\n%s\n\n" "Usage: $(basename $0): [-d] [-e email address] [-f filename] [-m y/n] [-s subject] "
+        exit 1
+        ;;
+    :)
+        printf "\n\t %s %s %s" "Illegal option: " $OPTARG "requires an argument"
+        exit 1
+        ;;
+  esac
+done
+shift "$((OPTIND -1))"
+
+printf "%s\t\t %s\t\t %s\n" "DEBUG" "EMAIL_TO" "MAIL_FILE"
+printf "%s\t\t %s\t\t %s\n" $DEBUG $EMAIL_TO $MAIL_FILE
 
 # --- Create the email header ---
 (
@@ -92,7 +95,6 @@ print_raw "<pre style='font-size':14px>"
 zStatus=$(zpool list -T d -v)
 print_raw $zStatus
 print_raw "</pre>"
-
 
 # Create an HTML Table of the results.  This tends to read better on mail readers and phones than
 # just outputing formatted text.
