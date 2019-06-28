@@ -15,16 +15,14 @@
 
 # --- Modify the behavior of the script to reduce errors and make sure all variables are defined.
 
-set -e
-set -u
-set -o pipefail
+#set -e
+#set -u
+#set -o pipefail
 
-# --- Global Variables ---
-# --- Declare all variables before being used.
-# --- 
+# --- Global Variables
 
-DEBUG=1
-MAIL_FILE="n"
+DEBUG="n"
+MAIL_FILE="y"
 O_FILE="/tmp/disk_overview.html"
 EMAIL_TO="user@company.com"
 HOST_NAME=$(hostname -s | tr '[:lower:]' '[:upper:]')
@@ -37,27 +35,32 @@ print_td () { echo "<td>$1</td>" >> ${O_FILE}; }
 print_raw () { echo $1 >> ${O_FILE}; }
 start_row () { echo "<tr>" >> ${O_FILE}; }
 end_row () { echo "</tr>" >> ${O_FILE}; }
-DEBUG() { 
-if [ $DEBUG -eq 0 ] 
-  then printf "%s" "$1" 
-  fi; 
-}
 
+DEBUG() { 
+  # --- A simple function to print out some debugging data.  First variable is type 
+  #     of information [INFO, WARN, ERROR] and second is the message to print out. ---
+  if [ $DEBUG == "y" ] 
+  then 
+    printf "%(%m-%d-%Y %H:%M:%S)T\t%s\t%s\t%s\n" $(date +%s) "$0 $1 $2"
+  fi
+ }
 
 # --- Parse the command line arguments ---
-
-DEBUG "$(date) Starting the disk check script ..."
 
 while getopts 'de:f:m:s:' arg; do
   case $arg in
     d)
-        DEBUG=0
+        DEBUG="y"
         ;;
     e)
         EMAIL_TO="$OPTARG"
         ;;
     f)
         O_FILE="$OPTARG"
+        ;;
+    h)
+        printf "\n%s\n\n" "Usage: $(basename $0): [-d] [-e email address] [-f filename] [-m y/n] [-s subject] "
+        exit 1
         ;;
     m)
         MAIL_FILE="$OPTARG"
@@ -77,8 +80,7 @@ while getopts 'de:f:m:s:' arg; do
 done
 shift "$((OPTIND -1))"
 
-printf "%s\t\t %s\t\t %s\n" "DEBUG" "EMAIL_TO" "MAIL_FILE"
-printf "%s\t\t %s\t\t %s\n" $DEBUG $EMAIL_TO $MAIL_FILE
+DEBUG "INFO" "Starting the disk check script ..."
 
 # --- Create the email header ---
 (
@@ -86,18 +88,27 @@ echo To: $EMAIL_TO
 echo Subject: $MAIL_SUBJECT
 echo Content-Type: text/html
 echo MIME-Version: 1.0
-echo "<html>" 
 ) > ${O_FILE}
 
-# Print out the short status of the zpools
+# --- Create the HTML PAGE portion ---
+print_raw "<!DOCTYPE html>"
+print_raw "<html>"
+print_raw "<head>"
+print_raw "<style>"
+print_raw "<body {font-family: verdana; font-size: 10px; color: black}</body>"
+print_raw "</style>"
+print_raw "</head>"
+print_raw "<body>"
+
+# --- Print out the short status of the zpools ---
 print_raw "<h1>Zpool Summary</h1>"
-print_raw "<pre style='font-size':14px>"
+print_raw "<pre>"
 zStatus=$(zpool list -T d -v)
-print_raw $zStatus
+print_raw "$zStatus"
 print_raw "</pre>"
 
-# Create an HTML Table of the results.  This tends to read better on mail readers and phones than
-# just outputing formatted text.
+# --- Create an HTML Table of the results.  This tends to read better on mail readers and phones than ---
+# --- just outputing formatted text. ---
 
 print_raw "<h1>SMARTCTL Status for Disks Found</h1>"
 print_raw "<table>"
@@ -116,18 +127,21 @@ print_td "BAD SECTORS"
 print_td "TEMPERATURE"
 end_row
 
-echo $(date) "Iterrating through disks..."
+DEBUG "INFO" "Iterrating through disks..."
 
 for i in $LIST_OF_DISKS 
   do
+    DEBUG "INFO" "Examining disk $i"
     full_results=$(smartctl -a /dev/$i)
 
     # Check to see if it is a USB device and set the device type to scsi
     # NB: USB devices generally do not support SMART
 
     usb_dev=$(grep 'USB bridge' <<< $full_results)
+
     if [[ -n "${usb_dev/[ ]*\n/}" ]]
     then
+      DEBUG "INFO" "$i is a USB Disk"
       full_results=$(smartctl -a -d scsi /dev/$i)
       model=$(grep 'Product' <<< $full_results | awk '/Product/ {print $2}')
       test_results="N/A"
@@ -149,17 +163,29 @@ for i in $LIST_OF_DISKS
     print_td $temp
     end_row
  done
-
 print_raw "</table>"
 
-# Close the file and send it
+print_raw "</body>"
 print_raw "</html>"
 
-if $MAIL_FILE 
+# --- Send the file if required. ---
+
+if [ $MAIL_FILE != "n" ]
 then
-  echo $(date) "Sending the report ..."
-  # sendmail -t < $O_FILE
+  DEBUG "INFO" "Sending the report to $EMAIL_TO"
+  sendmail -t < $O_FILE
+else
+  DEBUG "INFO" "Not sending file"
 fi
 
-echo $(date) "Ending the disk checking script"
+# --- Clean up 
+DEBUG "INFO" "Cleaning up."
+
+if [ $DEBUG = "n" ]
+then
+  DEBUG "INFO" "Deleting $O_FILE."
+  rm $O_FILE
+fi
+
+DEBUG "INFO" "Ending the disk checking script"
 exit 0
