@@ -13,37 +13,39 @@
 #     -s "subject"                   subject of email
 # ---
 
-# --- Modify the behavior of the script to reduce errors and make sure all variables are defined.
-
-#set -e
-#set -u
-#set -o pipefail
-
 # --- Global Variables
-
 DEBUG="n"
 MAIL_FILE="y"
 O_FILE="/tmp/disk_overview.html"
 EMAIL_TO="user@company.com"
-HOST_NAME=$(hostname -s | tr '[:lower:]' '[:upper:]')
+HOST_NAME=$(hostname -f | tr '[:lower:]' '[:upper:]')
 MAIL_SUBJECT="FreeNAS SMART and Disk Summary for $HOST_NAME"
 DISKS=$(geom disk list | grep Name | awk '{print $3}')
 LIST_OF_DISKS=$(sort <<<"${DISKS[*]}")
 
 # --- Useful functions ---
-print_td () { echo "<td>$1</td>" >> ${O_FILE}; }
-print_raw () { echo $1 >> ${O_FILE}; }
-start_row () { echo "<tr>" >> ${O_FILE}; }
-end_row () { echo "</tr>" >> ${O_FILE}; }
+function print_td () { echo "<td>$1</td>" >> ${O_FILE}; }
+function print_raw () { echo $1 >> ${O_FILE}; }
+function start_row () { echo "<tr>" >> ${O_FILE}; }
+function end_row () { echo "</tr>" >> ${O_FILE}; }
+function LOG() { if [ $DEBUG == "y" ]; then printf "%(%m-%d-%Y %H:%M:%S)T\t%s\t%s\t%s\n" $(date +%s) "$0 $1 $2"; fi; }
 
-DEBUG() { 
-  # --- A simple function to print out some debugging data.  First variable is type 
-  #     of information [INFO, WARN, ERROR] and second is the message to print out. ---
-  if [ $DEBUG == "y" ] 
-  then 
-    printf "%(%m-%d-%Y %H:%M:%S)T\t%s\t%s\t%s\n" $(date +%s) "$0 $1 $2"
+function print_row() {
+  LOG "INFO" "Number of variables passed to ${FUNCNAME} was: $#"
+  expected_inputs=13
+  if [ $expected_inputs -ne $# ]; then
+    echo "ERROR -- ${FUNCNAME} -- Incorrect number of parameters passed."
+    for i in "$@"; do
+      echo "$i..."
+    done
+    exit -1
   fi
- }
+  start_row
+  for i in "$@"; do
+    print_td "$i"
+  done
+  end_row
+}
 
 # --- Parse the command line arguments ---
 
@@ -80,7 +82,7 @@ while getopts 'de:f:m:s:' arg; do
 done
 shift "$((OPTIND -1))"
 
-DEBUG "INFO" "Starting the disk check script ..."
+LOG "INFO" "Starting the disk check script ..."
 
 # --- Create the email header ---
 (
@@ -95,76 +97,124 @@ print_raw "<!DOCTYPE html>"
 print_raw "<html>"
 print_raw "<head>"
 print_raw "<style>"
-print_raw "<body {font-family: verdana; font-size: 10px; color: black}</body>"
+print_raw "<body {font-family: verdana; font-size: 10px; color: black}>"
 print_raw "</style>"
 print_raw "</head>"
 print_raw "<body>"
 
 # --- Print out the short status of the zpools ---
-print_raw "<h1>Zpool Summary</h1>"
-print_raw "<pre>"
-zStatus=$(zpool list -T d -v)
-print_raw "$zStatus"
-print_raw "</pre>"
+#print_raw "<h1>Zpool Summary</h1>"
+#print_raw "<pre>"
+#zStatus=$(zpool list -T d -v)
+#print_raw "$zStatus"
+#print_raw "</pre>"
 
 # --- Create an HTML Table of the results.  This tends to read better on mail readers and phones than ---
 # --- just outputing formatted text. ---
 
 print_raw "<h1>SMARTCTL Status for Disks Found</h1>"
 print_raw "<table>"
-start_row
-print_td "DISK"
-print_td "Serial #"
-print_td "Hours Powered On"
-print_td "Start/Stop Count"
-print_td "Total Seeks"
-print_td "Seek Errors"
-print_td "Command Timeouts"
+print_row "DISK" "Serial #" "MODEL" "TYPE" "CAPACITY" "Hours Powered On" "Start/Stop Count" "Total Seeks" "Seek Errors" \
+           "Command Timeouts" "TEST STATUS" "BAD SECTORS" "TEMP"
 
-print_td "MODEL"
-print_td "TEST STATUS"
-print_td "BAD SECTORS"
-print_td "TEMPERATURE"
-end_row
 
-DEBUG "INFO" "Iterrating through disks..."
+# --- Cycle thrrough the disks and collect data dependent upon what type
 
+LOG "INFO" "Iterrating through disks..."
 for i in $LIST_OF_DISKS 
   do
-    DEBUG "INFO" "Examining disk $i"
+    ser_num=99
+    model=98
+    dev_type="UNK"
+    capacity="xxxGB"
+    pwr_on_hrs=97
+    start_stop_ct=96
+    total_seeks=96
+    seek_errors=94
+    cmd_errors=93
+    test_results=92
+    bad_sectors=90
+    temp=0
+
+    # --- Just do the smartctl call once if possible
+
     full_results=$(smartctl -a /dev/$i)
-
-    # Check to see if it is a USB device and set the device type to scsi
-    # NB: USB devices generally do not support SMART
-
+    ssd_dev=$(grep 'Solid State Device' <<< $full_results)
     usb_dev=$(grep 'USB bridge' <<< $full_results)
+    offline_dev=$(grep 'INQUIRY failed' <<< $full_results)
 
-    if [[ -n "${usb_dev/[ ]*\n/}" ]]
-    then
-      DEBUG "INFO" "$i is a USB Disk"
-      full_results=$(smartctl -a -d scsi /dev/$i)
-      model=$(grep 'Product' <<< $full_results | awk '/Product/ {print $2}')
-      test_results="N/A"
-      bad_sectors="N/A"
-      temp="N/A"
-
+    # --- Try to classify the device type
+    if [[ -n "${ssd_dev/[ ]*\n}" ]]; then
+      dev_type="SSD"
+    elif [[ -n "${usb_dev/[ ]*\n/}" ]]; then
+      dev_type="USB"      
+    elif [[ -n "${offline_dev/ [ ]*\n}" ]]; then
+      dev_type="OFFLINE"
     else
-      model=$(grep 'Device Model' <<< $full_results |awk '/Device Model/ {print $3 $4}')
-      test_results=$(grep 'test result' <<< $full_results | awk '/test result/ {print $6}')
-      bad_sectors=$(grep 'Reallocated_Sector_Ct' <<< $full_results | awk '/Reallocated_Sector_Ct/ {print $10}')
-      temp=$(grep 'Temperature_Celsius' <<< $full_results | awk '/Temperature_Celsius/ {print $10}')
+      dev_type="HDD"
     fi
+    LOG "INFO" "Examing device $i which is $dev_type device."
 
-    start_row
-    print_td $i
-    print_td $model 
-    print_td $test_results
-    print_td $bad_sectors
-    print_td $temp
-    end_row
+    # --- For each of the device types, collect the appropriate information
+    case $dev_type in
+      HDD)
+        ser_num=$(grep       'Serial Number'         <<< $full_results | awk '/Serial Number/         {print $3}')
+        model=$(grep         'Device Model'          <<< $full_results | awk '/Device Model/          {print $3 $4}')
+        capacity=$(grep      'User Capacity'         <<< $full_results | awk '/User Capacity/         {print $5 $6}')
+        pwr_on_hrs=$(grep    'Power_On_Hours'        <<< $full_results | awk '/Power_On_Hours/        {print $10}')
+        start_stop_ct=$(grep 'Start_Stop_Count'      <<< $full_results | awk '/Start_Stop_Count/      {print $10}')
+        total_seeks=$(grep   'Power_On_Hours'        <<< $full_results | awk '/Power_On_Hours/        {print $10}')
+        seek_errors=$(grep   'Reallocated_Sector_Ct' <<< $full_results | awk '/Reallocated_Sector_Ct/ {print $10}')
+        cmd_errors=$(grep    'Command_Timeout'       <<< $full_results | awk '/Reallocated_Sector_Ct/ {print $10}')
+        test_results=$(grep  'test result'           <<< $full_results | awk '/test result/           {print $6}')
+        bad_sectors=$(grep   'Reallocated_Sector_Ct' <<< $full_results | awk '/Reallocated_Sector_Ct/ {print $10}')
+        temp=$(grep          'Temperature_Celsius'   <<< $full_results | awk '/Temperature_Celsius/   {print $10}')
+        ;;
+ 
+      SSD)
+        LOG "INFO" "Collecting information for SDD type disk"
+        ser_num=$(grep       'Serial Number'         <<< $full_results | awk '/Serial Number/         {print $3}')
+        model=$(grep         'Device Model'          <<< $full_results | awk '/Device Model/          {print $3 $4}')
+        capacity=$(grep      'User Capacity'         <<< $full_results | awk '/User Capacity/         {print $5 $6}')
+        pwr_on_hrs=$(grep    'Power_On_Hours'        <<< $full_results | awk '/Power_On_Hours/        {print $10}')
+        start_stop_ct=$(grep 'Start_Stop_Count'      <<< $full_results | awk '/Start_Stop_Count/      {print $10}')
+        total_seeks=$(grep   'Power_On_Hours'        <<< $full_results | awk '/Power_On_Hours/        {print $10}')
+        seek_errors=$(grep   'Reallocated_Sector_Ct' <<< $full_results | awk '/Reallocated_Sector_Ct/ {print $10}')
+        cmd_errors=$(grep    'Command_Timeout'       <<< $full_results | awk '/Reallocated_Sector_Ct/ {print $10}')
+        test_results=$(grep  'test result'           <<< $full_results | awk '/test result/           {print $6}')
+        bad_sectors=$(grep   'Reallocated_Sector_Ct' <<< $full_results | awk '/Reallocated_Sector_Ct/ {print $10}')
+        temp=$(grep          'Temperature_Celsius'   <<< $full_results | awk '/Temperature_Celsius/   {print $10}')
+        ;;
+
+      USB)
+        LOG "INFO" "Collecting information for USB type disk"
+        full_results=$(smartctl -a -d scsi /dev/$i)
+        model=$(grep 'Product' <<< $full_results | awk '/Product/ {print $2}')
+        test_results="N/A"
+        bad_sectors="N/A"
+        temp="N/A"
+        ;;
+
+      OFFLINE)
+        LOG "INFO" "Disk is offline."
+        ;;
+
+      *)
+        LOG "INFO" "Unknown disk type"
+        ;;
+    esac
+
+    # --- Print out the table row
+#    print_row $i $ser_num $model $dev_type $capacity $pwr_on_hrs $start_stop_ct $total_seeks $seek_errors $cmd_errors $test_results $bad_sectors $temp
+    print_row "$i" "$ser_num" "$model" "$dev_type" "$capacity" "$pwr_on_hrs" "$start_stop_ct" "$total_seeks" "$seek_errors" "$cmd_errors" "$test_results" "$bad_sectors" "$temp"
+
  done
+
+
+
 print_raw "</table>"
 
+# --- End the HTML document properly
 print_raw "</body>"
 print_raw "</html>"
 
@@ -172,20 +222,20 @@ print_raw "</html>"
 
 if [ $MAIL_FILE != "n" ]
 then
-  DEBUG "INFO" "Sending the report to $EMAIL_TO"
+  LOG "INFO" "Sending the report to $EMAIL_TO"
   sendmail -t < $O_FILE
 else
-  DEBUG "INFO" "Not sending file"
+  LOG "INFO" "Not sending file"
 fi
 
 # --- Clean up 
-DEBUG "INFO" "Cleaning up."
+LOG "INFO" "Cleaning up."
 
 if [ $DEBUG = "n" ]
 then
-  DEBUG "INFO" "Deleting $O_FILE."
+  LOG "INFO" "Deleting $O_FILE."
   rm $O_FILE
 fi
 
-DEBUG "INFO" "Ending the disk checking script"
+LOG "INFO" "Ending the disk checking script"
 exit 0
