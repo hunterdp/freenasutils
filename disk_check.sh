@@ -1,5 +1,5 @@
-#!/usr/local/bin/bash
-# 
+#!/bin/bash
+# ---
 # Description:
 #   A simple script to collect some information about the disks on the freenas server.  The data
 #   is stored in a file and setup to enable mailing of the file.
@@ -11,8 +11,48 @@
 #     -f filename                    filename to 
 #     -m y|n                         mail the file or not
 #     -s "subject"                   subject of email
-#     -t html|text                   output in either html or formatted text
-# 
+#     -o html|text                   output in either html or formatted text
+#--- 
+
+# Check for min version of BASH
+BASH_MIN_VER="4"
+BASH_CUR_VER=$(bash --version | grep 'GNU bash' | awk '{print substr($4,1,1)}')
+
+if [[ $BASH_MIN_VER != $BASH_CUR_VER ]]; then
+  printf "%(%m-%d-%Y %H:%M:%S)T\t%s\t%s\n" $(date +%s) $0 "ERROR ${FUNCNAME[0]} This script requires at least BASH $BASH_MIN_VER."
+  exit 1
+fi
+
+# Make sure we have all the required commands available that we may use.  
+declare -A CMDS
+REQ_CMDS="awk uname hostname smartctl uptime"
+OPT_CMDS="geom lsblk dmidecode"
+ALL_CMDS="$REQ_CMDS $OPT_CMDS"
+echo "ALL COMMANDS = $ALL_CMDS"
+
+cmds_missing=0
+for i in $ALL_CMDS; do
+  CMDS["$i"]="YES"
+  if ! hash "$i" > /dev/null 2>&1; then
+    printf "Command not found in PATH: %s\n" "$i" >&2
+    CMDS["$i"]="NO"
+    ((cmds_missing++))
+  fi
+done
+
+if ((cmds_missing > 0)); then
+  printf "%d commands are missing or not in PATH, exiting...\n" "$cmds_missing" >&2
+#  exit 1
+else
+  printf "%(%m-%d-%Y %H:%M:%S)T\t%s\t%s\n" $(date +%s) $0 "INFO ${FUNCNAME[0]} All commands are found on the system"
+fi
+
+# Print out the array
+printf "Number of Commands ${#CMDS[*]}\n"
+for i in ${!CMDS[*]}; do
+  printf " %s:\t%s\n..." $i ${CMDS[$i]}
+done
+
 
 #  Global Variables
 DEBUG="n"
@@ -83,14 +123,14 @@ function print_row() {
 #### Script starts
 
 #  Parse the command line arguments
-while getopts 'de:f:m:s:t:' arg; do
+while getopts 'de:f:m:s:o:' arg; do
   case $arg in
     d)      DEBUG="y"           ;;
     e)      EMAIL_TO="$OPTARG"  ;;
     f)      O_FILE="$OPTARG"    ;;
     m)      MAIL_FILE="$OPTARG" ;;
     s)      EMAIL_SUBJECT="$OPTARG" ;;
-    t)      O_FORMAT="$OPTARG"  ;;
+    o)      O_FORMAT="$OPTARG"  ;;
     ? | h)  printf "\n%s\n\n" "Usage: $(basename $0): [-d] [-e email address] [-f filename] [-m y/n] [-s subject] "
             exit 1             ;;
     :)      printf "\n\t %s %s %s" "Illegal option: " $OPTARG "requires an argument"
