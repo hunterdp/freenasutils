@@ -22,55 +22,46 @@ O_FILE="/tmp/disk_overview.html"
 EMAIL_TO="user@company.com"
 HOST_NAME=$(hostname -f | tr '[:lower:]' '[:upper:]')
 MAIL_SUBJECT="FreeNAS SMART and Disk Summary for $HOST_NAME on $(date)"
+
+# NB: Need to check if geom command is available, if not try lsblk or ?
 DISKS=$(geom disk list | grep Name | awk '{print $3}')
 LIST_OF_DISKS=$(sort <<<"${DISKS[*]}")
 
+UPTIME=$(uptime | awk '{ print $3, $4, $5 }' | sed 's/,//g')
+
+ARCH_TYPE=$(uname -m)
+PROC_TYPE=$(uname -p)
+OS_TYPE=$(uname -s)
+OS_VER=$(uname -o)
+OS_REL=$(uname -r)
+
 # Functions 
 
-function log_info () { 
+# Collect basic system information in portable manner as possible.
+print_sys_info () {
+  log_info "${FUNCNAME[0]}" "INFO" "-- System Information ------------"
+  log_info "${FUNCNAME[0]}" "INFO" "================================"
+  log_info "${FUNCNAME[0]}" "INFO" "Host Name:      $HOSTNAME"
+  log_info "${FUNCNAME[0]}" "INFO" "System Uptime:  $UPTIME"
+  log_info "${FUNCNAME[0]}" "INFO" "Arch Type:      $ARCH_TYPE"
+  log_info "${FUNCNAME[0]}" "INFO" "Procesor Type:  $PROC_TYPE"
+  log_info "${FUNCNAME[0]}" "INFO" "OS Version:     $OS_VER"
+  log_info "${FUNCNAME[0]}" "INFO" "OS Release:     $OS_REL"  
+  log_info "${FUNCNAME[0]}" "INFO" "================================"
+}
+
+# A simple logging function
+# NB: Should move to logger to be consistent with syslog 
+function log_info () {
   if [ $DEBUG == "y" ]; then 
-    printf "%(%m-%d-%Y %H:%M:%S)T\t%s\t%s\t%s\n" $(date +%s) "$0 $1 $2"; fi; 
+    printf "%(%m-%d-%Y %H:%M:%S)T\t%s\t%s\t%s\t%s\n" $(date +%s) "$0 ${FUNCNAME[0]} $1 $2 $3"; fi; 
 }
 
-# Get generic system information in a portable manner
-function get_system_info () {
-  UPTIME=$(uptime | awk '{ print $3, $4, $5 }' | sed 's/,//g')
-  HW_PLATFORM=$(uname -m)
-  KERNEL_TYPE=$(uname -s)
-  KERNEL_RELEASE=$(uname -r)
-  OS_TYPE=$(uname -o)
-  OS_VER=$(uname -r)
-
-  # Note that for embedded devices, the SMBIOS table may not be populated or even exist.
-  PROD_NAME=$(dmidecode -s system-product-name)
-  MANF_NAME=$(dmidecode -s system-manufacturer)
-  PROC_FAMILY=$(dmidecode -s processor-family)
-  PROC_MANF=$(dmidecode -s processor-manufacturer)
-  PROC_VER=$(dmidecode -s processor-version)
-  PROC_FREQ=$(dmidecode -s processor-frequency)
-
-  # If the system has been up for a while, look for the dmesg.boot file which should
-  # contain a dump of the buffer just before syslog started. 
-  DMESG=$(dmesg | grep -i cpu)
-  if [[ -z $DMESG ]]; then
-    log_info "INFO" "Unable to get cpu information from dmesg, trying dmesg.boot file"
-    if [[ -e /var/run/dmesg.boot ]]; then
-      DMESG=$(grep -i cpu /var/run/dmesg.boot)
-    else 
-       log_info "ERROR" "File /var/run/dmesg.boot not found"
-       DMESG=""
-    fi
-  fi
-  # Network interfaces
-  NUMBER_NETWORK_INTERFACES=$(netstat -i -4 | awk '{print $1}' | wc -l)
-}
-
-# HTML Web Page'
+# HTML Web Page functions specific to this script
 function print_td () { echo "<td>$1</td>" >> ${O_FILE}; }
 function print_raw () { echo $1 >> ${O_FILE}; }
 function start_row () { echo "<tr>" >> ${O_FILE}; }
 function end_row () { echo "</tr>" >> ${O_FILE}; }
-
 function print_row() {
   expected_inputs=15
   if [ $expected_inputs -ne $# ]; then
@@ -89,6 +80,8 @@ function print_row() {
   end_row
 }
 
+#### Script starts
+
 #  Parse the command line arguments
 while getopts 'de:f:m:s:t:' arg; do
   case $arg in
@@ -106,11 +99,14 @@ while getopts 'de:f:m:s:t:' arg; do
 done
 shift "$((OPTIND -1))"
 
-log_info "INFO" "Starting the disk check script ..."
+log_info "${FUNCNAME[0]}" "INFO" "Starting the disk check script ..."
 if test -f "$O_FILE"; then
-  log_info "INFO" "$O_FILE exists.  Deleting."
+  log_info "${FUNCNAME[0]}" "INFO" "$O_FILE exists.  Deleting."
   rm $O_FILE
 fi
+
+if [ $DEBUG == "y" ]; then print_sys_info; fi;
+
 
 #  Create the email header
 (
@@ -145,7 +141,7 @@ print_row "Device" "Type" "Serial #" "Model" "Capacity" "Speed" "Current Speed" 
 
 #  Cycle thrrough the disks and collect data dependent upon what type
 #  NB: I should sort the list of disks by type and output seperate data
-log_info "INFO" "Iterrating through disks..."
+log_info "${FUNCNAME[0]}" "INFO" "Iterrating through disks..."
 for i in $LIST_OF_DISKS 
   do
     #  Reset all the variables to blank
@@ -180,7 +176,7 @@ for i in $LIST_OF_DISKS
     else
       dev_type="HDD"
     fi
-    log_info "INFO" "Examing device $i which is $dev_type device."
+    log_info "${FUNCNAME[0]}" "INFO" "Examing device $i which is $dev_type device."
 
     #  For each of the device types, collect those common SMART values that could indicate an issue 
     #  You can find more details at https://en.wikipedia.org/wiki/S.M.A.R.T.
@@ -216,11 +212,11 @@ for i in $LIST_OF_DISKS
         ;;
 
       OFFLINE)
-        log_info "INFO" "Disk is offline."
+        log_info "${FUNCNAME[0]}" "INFO" "Disk is offline."
         ;;
 
       *)
-        log_info "INFO" "Unknown disk type"
+        log_info "${FUNCNAME[0]}" "INFO" "Unknown disk type"
         ;;
     esac
 
@@ -242,22 +238,22 @@ print_raw "</html>"
 
 if [ $MAIL_FILE != "n" ]
 then
-  log_info "INFO" "Sending the report to $EMAIL_TO"
+  log_info "${FUNCNAME[0]}" "INFO" "Sending the report to $EMAIL_TO"
   sendmail -t < $O_FILE
 else
-  log_info "INFO" "Not sending file"
+  log_info "${FUNCNAME[0]}" "INFO" "Not sending file"
 fi
 
 #  Clean up 
-log_info "INFO" "Cleaning up."
+log_info "${FUNCNAME[0]}" "INFO" "Cleaning up."
 
 if [ $DEBUG = "n" ]
 then
-  log_info "INFO" "Deleting $O_FILE."
+  log_info "${FUNCNAME[0]}" "INFO" "Deleting $O_FILE."
   rm $O_FILE
 fi
 
-log_info "INFO" "Ending the disk checking script"
+log_info "${FUNCNAME[0]}" "INFO" "Ending the disk checking script"
 exit 0
 
 
