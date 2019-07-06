@@ -14,7 +14,7 @@
 #     -o html|text                   output in either html or formatted text
 #--- 
 
-# Check for min version of BASH
+##### Check for min versions  #####
 BASH_MIN_VER="4"
 BASH_CUR_VER=$(bash --version | grep 'GNU bash' | awk '{print substr($4,1,1)}')
 
@@ -23,38 +23,12 @@ if [[ $BASH_MIN_VER != $BASH_CUR_VER ]]; then
   exit 1
 fi
 
-# Make sure we have all the required commands available that we may use.  
-declare -A CMDS
-REQ_CMDS="awk uname hostname smartctl uptime"
-OPT_CMDS="geom lsblk dmidecode"
-ALL_CMDS="$REQ_CMDS $OPT_CMDS"
-echo "ALL COMMANDS = $ALL_CMDS"
+#####  Global Variables and Constants #####
+TRUE="YES"
+FALSE="NO"
+FAILURE=1
+SUCCESS=0
 
-cmds_missing=0
-for i in $ALL_CMDS; do
-  CMDS["$i"]="YES"
-  if ! hash "$i" > /dev/null 2>&1; then
-    printf "Command not found in PATH: %s\n" "$i" >&2
-    CMDS["$i"]="NO"
-    ((cmds_missing++))
-  fi
-done
-
-if ((cmds_missing > 0)); then
-  printf "%d commands are missing or not in PATH, exiting...\n" "$cmds_missing" >&2
-#  exit 1
-else
-  printf "%(%m-%d-%Y %H:%M:%S)T\t%s\t%s\n" $(date +%s) $0 "INFO ${FUNCNAME[0]} All commands are found on the system"
-fi
-
-# Print out the array
-printf "Number of Commands ${#CMDS[*]}\n"
-for i in ${!CMDS[*]}; do
-  printf " %s:\t%s\n..." $i ${CMDS[$i]}
-done
-
-
-#  Global Variables
 DEBUG="n"
 MAIL_FILE="y"
 O_FORMAT="html"
@@ -63,22 +37,88 @@ EMAIL_TO="user@company.com"
 HOST_NAME=$(hostname -f | tr '[:lower:]' '[:upper:]')
 MAIL_SUBJECT="FreeNAS SMART and Disk Summary for $HOST_NAME on $(date)"
 
-# NB: Need to check if geom command is available, if not try lsblk or ?
-DISKS=$(geom disk list | grep Name | awk '{print $3}')
-LIST_OF_DISKS=$(sort <<<"${DISKS[*]}")
+DISKS=""
+LIST_OF_DISKS=""
 
 UPTIME=$(uptime | awk '{ print $3, $4, $5 }' | sed 's/,//g')
-
 ARCH_TYPE=$(uname -m)
 PROC_TYPE=$(uname -p)
 OS_TYPE=$(uname -s)
 OS_VER=$(uname -o)
 OS_REL=$(uname -r)
 
-# Functions 
+declare -A CMDS
+REQ_CMDS="awk uname hostname smartctl uptime"
+OPT_CMDS="geom lsblk dmidecode lshw blkid sysctl"
+ALL_CMDS="$REQ_CMDS $OPT_CMDS"
 
-# Collect basic system information in portable manner as possible.
-print_sys_info () {
+##### Functions #####
+
+function check_avail_commands () {
+  local cmds_missing=0
+  local i=''
+
+  for i in $ALL_CMDS; do
+    CMDS["$i"]=$TRUE
+    if ! hash "$i" > /dev/null 2>&1; then
+      CMDS["$i"]=$FALSE
+      ((cmds_missing++))
+    fi
+  done
+
+  log_info "${FUNCNAME[0]}" "INFO" "Number of commands to check is: ${#CMDS[*]}"
+  if ((cmds_missing > 0)); then
+    log_info "${FUNCNAME[0]}" "INFO" "$cmds_missing commands are missing or not in PATH."
+  else
+    log_info "${FUNCNAME[0]}" "INFO" "All commands are found on the system."
+  fi
+
+  for i in ${!CMDS[*]}; do
+     log_info "${FUNCNAME[0]}" "INFO" " $i : ${CMDS[$i]}"
+  done
+  return $SUCCESS
+}
+
+function command_available () {
+  local i=''
+  log_info "${FUNCNAME[0]}" "INFO" "Number of commands to check: ${#CMDS[*]}."
+  log_info "${FUNCNAME[0]}" "INFO" "Checking on status of $1 command."
+
+  for i in ${!CMDS[*]}; do
+    if [[ $1 == $i ]]; then
+      log_info "${FUNCNAME[0]}" "INFO" "Commands $1 found and is available: ${CMDS[$i]}."
+      return 0
+    fi
+  done
+  return $SUCCESS
+}
+
+function get_disks () {
+  log_info "${FUNCNAME[0]}" "INFO" "Generating a list of all disks on the system."
+  command_available geom
+  if [[ $? -eq 0 ]]; then
+    log_info "${FUNCNAME[0]}" "INFO" "geom command available."
+    DISKS=$(geom disk list | grep Name | awk '{print $3}')
+
+  else
+    command_avail lsblk;
+    if [[ $? -eq 0 ]]; then
+      log_info "${FUNCNAME[0]}" "INFO" "lsblk command available."
+      
+    else
+     log_info "${FUNCNAME[0]}" "ERROR" "No disks found.  Aborting."
+     exit $FAILURE
+    fi
+  fi
+
+  LIST_OF_DISKS=$(sort <<<"${DISKS[*]}")
+  if [[ -z $LIST_OF_DISKS ]]; then
+    log_info "${FUNCNAME[0]}" "ERROR" "No disks found.  Aborting."
+    exit $FAILURE
+  fi
+}
+
+function print_sys_info () {
   log_info "${FUNCNAME[0]}" "INFO" "-- System Information ------------"
   log_info "${FUNCNAME[0]}" "INFO" "================================"
   log_info "${FUNCNAME[0]}" "INFO" "Host Name:      $HOSTNAME"
@@ -88,20 +128,37 @@ print_sys_info () {
   log_info "${FUNCNAME[0]}" "INFO" "OS Version:     $OS_VER"
   log_info "${FUNCNAME[0]}" "INFO" "OS Release:     $OS_REL"  
   log_info "${FUNCNAME[0]}" "INFO" "================================"
+  return $SUCCESS
 }
 
+function log_info () {
 # A simple logging function
 # NB: Should move to logger to be consistent with syslog 
-function log_info () {
   if [ $DEBUG == "y" ]; then 
     printf "%(%m-%d-%Y %H:%M:%S)T\t%s\t%s\t%s\t%s\n" $(date +%s) "$0 ${FUNCNAME[0]} $1 $2 $3"; fi; 
+  return $SUCCESS
 }
 
-# HTML Web Page functions specific to this script
-function print_td () { echo "<td>$1</td>" >> ${O_FILE}; }
-function print_raw () { echo $1 >> ${O_FILE}; }
-function start_row () { echo "<tr>" >> ${O_FILE}; }
-function end_row () { echo "</tr>" >> ${O_FILE}; }
+function print_td () { 
+  echo "<td>$1</td>" >> ${O_FILE}; 
+  return $SUCCESS; 
+}
+
+function print_raw () { 
+  echo $1 >> ${O_FILE}; 
+  return $SUCCESS 
+}
+
+function start_row () { 
+  echo "<tr>" >> ${O_FILE}; 
+  return $SUCCESS 
+}
+
+function end_row () { 
+  echo "</tr>" >> ${O_FILE};
+  return $SUCCESS 
+}
+
 function print_row() {
   expected_inputs=15
   if [ $expected_inputs -ne $# ]; then
@@ -111,16 +168,17 @@ function print_row() {
       printf "%s" "$i..."
     done
     printf "\n%s\n" "Exiting."
-    exit -1
+    return $FAILURE
   fi
   start_row
   for i in "$@"; do
     print_td "$i"
   done
   end_row
+  return $SUCCESS
 }
 
-#### Script starts
+#### Main script starts here
 
 #  Parse the command line arguments
 while getopts 'de:f:m:s:o:' arg; do
@@ -139,7 +197,7 @@ while getopts 'de:f:m:s:o:' arg; do
 done
 shift "$((OPTIND -1))"
 
-log_info "${FUNCNAME[0]}" "INFO" "Starting the disk check script ..."
+log_info "${FUNCNAME[0]}" "INFO" "Starting the disk check script."
 if test -f "$O_FILE"; then
   log_info "${FUNCNAME[0]}" "INFO" "$O_FILE exists.  Deleting."
   rm $O_FILE
@@ -147,6 +205,7 @@ fi
 
 if [ $DEBUG == "y" ]; then print_sys_info; fi;
 
+check_avail_commands
 
 #  Create the email header
 (
@@ -171,6 +230,7 @@ print_raw "</style>"
 print_raw "</head>"
 print_raw "<body>"
 
+
 #  Create an HTML Table of the results.  This tends to read better on mail readers and phones than
 #  just outputing formatted text. 
 
@@ -180,8 +240,9 @@ print_row "Device" "Type" "Serial #" "Model" "Capacity" "Speed" "Current Speed" 
           "End to End Errors" "Spin Retries" "Command Timeouts" "Last Test" "Reallocated Sectors" "Temp"
 
 #  Cycle thrrough the disks and collect data dependent upon what type
-#  NB: I should sort the list of disks by type and output seperate data
-log_info "${FUNCNAME[0]}" "INFO" "Iterrating through disks..."
+get_disks
+
+log_info "${FUNCNAME[0]}" "INFO" "Iterrating through disks."
 for i in $LIST_OF_DISKS 
   do
     #  Reset all the variables to blank
@@ -294,7 +355,9 @@ then
 fi
 
 log_info "${FUNCNAME[0]}" "INFO" "Ending the disk checking script"
-exit 0
+
+return $SUCCESS
+
 
 
     #  Reallocated Sectors Count            Count of reallocated sectors. The raw value represents a 
