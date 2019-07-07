@@ -1,7 +1,7 @@
 #!/bin/bash
-# ---
+#
 # Description:
-#   A simple script to collect some information about the disks on the freenas server.  The data
+#   A simple script to collect some information about the disks on a Linux, FreeBSD or NetBSD server.  The data
 #   is stored in a file and setup to enable mailing of the file.
 # Usage:
 #   sh disk_check.sh command arguments
@@ -12,7 +12,7 @@
 #     -m y|n                         mail the file or not
 #     -s "subject"                   subject of email
 #     -o html|text                   output in either html or formatted text
-#--- 
+#####
 
 ##### Check for min versions  #####
 BASH_MIN_VER="4"
@@ -23,42 +23,39 @@ if [[ $BASH_MIN_VER != $BASH_CUR_VER ]]; then
   exit 1
 fi
 
-#####  Global Variables and Constants #####
+##### Constants #####
 TRUE="YES"
 FALSE="NO"
 FAILURE=1
 SUCCESS=0
+REQ_CMDS="awk uname hostname smartctl uptime hostname hash"
+OPT_CMDS="geom lsblk dmidecode lshw blkid sysctl"
+ALL_CMDS="$REQ_CMDS $OPT_CMDS"
+
+##### Global Variables #####
+declare -A CMDS
 
 DEBUG="n"
+
 MAIL_FILE="y"
 O_FORMAT="html"
 O_FILE="/tmp/disk_overview.html"
 EMAIL_TO="user@company.com"
+
 HOST_NAME=$(hostname -f | tr '[:lower:]' '[:upper:]')
 MAIL_SUBJECT="FreeNAS SMART and Disk Summary for $HOST_NAME on $(date)"
 
 DISKS=""
 LIST_OF_DISKS=""
 
-UPTIME=$(uptime | awk '{ print $3, $4, $5 }' | sed 's/,//g')
-ARCH_TYPE=$(uname -m)
-PROC_TYPE=$(uname -p)
-OS_TYPE=$(uname -s)
-OS_VER=$(uname -o)
-OS_REL=$(uname -r)
-
-declare -A CMDS
-REQ_CMDS="awk uname hostname smartctl uptime"
-OPT_CMDS="geom lsblk dmidecode lshw blkid sysctl"
-ALL_CMDS="$REQ_CMDS $OPT_CMDS"
-
 ##### Functions #####
 
 function check_avail_commands () {
   local cmds_missing=0
   local i=''
+  declare -A commands_to_check=$1
 
-  for i in $ALL_CMDS; do
+  for i in $commands_to_check; do
     CMDS["$i"]=$TRUE
     if ! hash "$i" > /dev/null 2>&1; then
       CMDS["$i"]=$FALSE
@@ -66,49 +63,64 @@ function check_avail_commands () {
     fi
   done
 
-  log_info "${FUNCNAME[0]}" "INFO" "Number of commands to check is: ${#CMDS[*]}"
+  log_info "${FUNCNAME[0]}" "INFO" "Checking ${#CMDS[*]} commands."
   if ((cmds_missing > 0)); then
     log_info "${FUNCNAME[0]}" "INFO" "$cmds_missing commands are missing or not in PATH."
   else
     log_info "${FUNCNAME[0]}" "INFO" "All commands are found on the system."
   fi
 
-  for i in ${!CMDS[*]}; do
-     log_info "${FUNCNAME[0]}" "INFO" " $i : ${CMDS[$i]}"
-  done
+  if [ $DEBUG == "y" ]; then
+    for i in ${!CMDS[*]}; do
+       log_info "${FUNCNAME[0]}" "INFO" " $i : ${CMDS[$i]}"
+    done
+  fi
   return $SUCCESS
 }
 
-function command_available () {
-  local i=''
-  log_info "${FUNCNAME[0]}" "INFO" "Number of commands to check: ${#CMDS[*]}."
-  log_info "${FUNCNAME[0]}" "INFO" "Checking on status of $1 command."
+function is_command_available () {
+  local command_element=""
+  local command_to_check_for=$1
 
-  for i in ${!CMDS[*]}; do
-    if [[ $1 == $i ]]; then
-      log_info "${FUNCNAME[0]}" "INFO" "Commands $1 found and is available: ${CMDS[$i]}."
-      return 0
+  log_info "${FUNCNAME[0]}" "INFO" "Checking on status of $1 command."
+  for command_element in ${!CMDS[*]}; do
+    if [[ $command_to_check_for == $command_element ]]; then
+      log_info "${FUNCNAME[0]}" "INFO" "Commands $command_to_check_for found."
+
+      if [[ $TRUE == ${CMDS[$command_element]} ]]; then
+        log_info "${FUNCNAME[0]}" "INFO" "$command_to_check_for is available. ${CMDS[$command_element]}."
+        return $SUCCESS
+      else
+        log_info "${FUNCNAME[0]}" "INFO" "$command_to_check_for is not available. ${CMDS[$command_element]}."
+        return $FAILURE
+       fi
     fi
   done
-  return $SUCCESS
+
+  log_info "${FUNCNAME[0]}" "INFO" "Commands $command_to_check_for is not found."
+  return $FAILURE
 }
 
 function get_disks () {
   log_info "${FUNCNAME[0]}" "INFO" "Generating a list of all disks on the system."
-  command_available geom
-  if [[ $? -eq 0 ]]; then
+
+  is_command_available geom
+  if [[ $? -eq $SUCCESS ]]; then
     log_info "${FUNCNAME[0]}" "INFO" "geom command available."
     DISKS=$(geom disk list | grep Name | awk '{print $3}')
 
   else
     command_avail lsblk;
-    if [[ $? -eq 0 ]]; then
+    if [[ $? -eq $SUCCESS ]]; then
       log_info "${FUNCNAME[0]}" "INFO" "lsblk command available."
-      
+      DISKS=$(lsblk -dp | grep -o '^/dev[^ ]*')
+
     else
      log_info "${FUNCNAME[0]}" "ERROR" "No disks found.  Aborting."
      exit $FAILURE
+
     fi
+
   fi
 
   LIST_OF_DISKS=$(sort <<<"${DISKS[*]}")
@@ -116,9 +128,17 @@ function get_disks () {
     log_info "${FUNCNAME[0]}" "ERROR" "No disks found.  Aborting."
     exit $FAILURE
   fi
+  return $SUCCESS
 }
 
 function print_sys_info () {
+  UPTIME=$(uptime | awk '{ print $3, $4, $5 }' | sed 's/,//g')
+  ARCH_TYPE=$(uname -m)
+  PROC_TYPE=$(uname -p)
+  OS_TYPE=$(uname -s)
+  OS_VER=$(uname -o)
+  OS_REL=$(uname -r)
+
   log_info "${FUNCNAME[0]}" "INFO" "-- System Information ------------"
   log_info "${FUNCNAME[0]}" "INFO" "================================"
   log_info "${FUNCNAME[0]}" "INFO" "Host Name:      $HOSTNAME"
@@ -132,8 +152,7 @@ function print_sys_info () {
 }
 
 function log_info () {
-# A simple logging function
-# NB: Should move to logger to be consistent with syslog 
+# NB: Should add an option to use logger to be consistent with syslog 
   if [ $DEBUG == "y" ]; then 
     printf "%(%m-%d-%Y %H:%M:%S)T\t%s\t%s\t%s\t%s\n" $(date +%s) "$0 ${FUNCNAME[0]} $1 $2 $3"; fi; 
   return $SUCCESS
@@ -178,6 +197,13 @@ function print_row() {
   return $SUCCESS
 }
 
+function check_paramcondition () {
+  local param_to_check=$1
+  local param_warn=$2
+  local param_err=$3
+
+
+}
 #### Main script starts here
 
 #  Parse the command line arguments
@@ -205,7 +231,7 @@ fi
 
 if [ $DEBUG == "y" ]; then print_sys_info; fi;
 
-check_avail_commands
+check_avail_commands "${ALL_CMDS[@]}"
 
 #  Create the email header
 (
@@ -356,7 +382,7 @@ fi
 
 log_info "${FUNCNAME[0]}" "INFO" "Ending the disk checking script"
 
-return $SUCCESS
+exit $SUCCESS
 
 
 
