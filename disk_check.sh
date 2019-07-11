@@ -1,6 +1,4 @@
 #!/bin/bash
-#
-# Description:
 #   A simple script to collect some information about the disks on a Linux, FreeBSD or NetBSD server.  The data
 #   is stored in a file and setup to enable mailing of the file.
 # Usage:
@@ -14,56 +12,76 @@
 #     -o html|text                   output in either html or formatted text
 #####
 
-##### Check for min versions  #####
-BASH_MIN_VER="4"
-BASH_CUR_VER=$(bash --version | grep 'GNU bash' | awk '{print substr($4,1,1)}')
-
-if [[ $BASH_MIN_VER != $BASH_CUR_VER ]]; then
-  printf "%(%m-%d-%Y %H:%M:%S)T\t%s\t%s\n" $(date +%s) $0 "ERROR ${FUNCNAME[0]} This script requires at least BASH $BASH_MIN_VER."
-  exit 1
-fi
-
 ##### Constants #####
-TRUE="YES"
-FALSE="NO"
-FAILURE=1
-SUCCESS=0
-REQ_CMDS="awk uname hostname smartctl uptime hostname hash"
-OPT_CMDS="geom lsblk dmidecode lshw blkid sysctl"
-ALL_CMDS="$REQ_CMDS $OPT_CMDS"
+declare -r TRUE="YES"
+declare -r FALSE="NO"
+declare -r FAILURE=1
+declare -r SUCCESS=0
+declare -r REQ_CMDS="awk uname hostname smartctl uptime hostname hash"
+declare -r OPT_CMDS="geom lsblk dmidecode lshw blkid sysctl pr column"
+declare -r ALL_CMDS="$REQ_CMDS $OPT_CMDS"
+declare -r BASH_MIN_VER="4"
+declare -r BASH_CUR_VER=$(bash --version | grep 'GNU bash' | awk '{print substr($4,1,1)}')
 
 ##### Global Variables #####
-declare -A CMDS
+declare -A CMDS_ARRAY
+declare -l DEBUG="n"
+declare -l MAIL_FILE="y"
+declare -l O_FORMAT="html"
+declare -l O_FILE="/tmp/disk_overview.html"
+declare EMAIL_TO="user@company.com"
+declare HOST_NAME=$(hostname -f | tr '[:lower:]' '[:upper:]')
+declare MAIL_SUBJECT="FreeNAS SMART and Disk Summary for $HOST_NAME on $(date)"
+declare DISKS=""
+declare LIST_OF_DISKS=""
+declare UPTIME
+declare ARCH_TYPE
+declare PROC_TYPE
+declare OS_TYPE
+declare OS_VER
+declare OS_REL
 
-DEBUG="n"
-
-MAIL_FILE="y"
-O_FORMAT="html"
-O_FILE="/tmp/disk_overview.html"
-EMAIL_TO="user@company.com"
-
-HOST_NAME=$(hostname -f | tr '[:lower:]' '[:upper:]')
-MAIL_SUBJECT="FreeNAS SMART and Disk Summary for $HOST_NAME on $(date)"
-
-DISKS=""
-LIST_OF_DISKS=""
 
 ##### Functions #####
 
+function err() {
+  echo "[$(date +'%Y-%m-%dT%H:%M:%S%z')]: $@" >&2
+}
+
+#---------------------
+### File functions ###
+#---------------------
+
+function check_file_exist()
+{
+  local -r file="${1}"
+  if [[ "${file}" = '' || ! -f "${file}" ]]; then
+    return $FAILURE
+  else
+    return $SUCCESS
+  fi
+}
+
+#------------------------
+### Command functions ### 
+#------------------------
 function check_avail_commands () {
+  # Looks to see if the commands in the array passed are available on the system
+  # and stores the results in the GLOBAL associative CMDS_ARRAY array
+
   local cmds_missing=0
   local i=''
   declare -A commands_to_check=$1
 
   for i in $commands_to_check; do
-    CMDS["$i"]=$TRUE
+    CMDS_ARRAY["$i"]=$TRUE
     if ! hash "$i" > /dev/null 2>&1; then
-      CMDS["$i"]=$FALSE
+      CMDS_ARRAY["$i"]=$FALSE
       ((cmds_missing++))
     fi
   done
 
-  log_info "${FUNCNAME[0]}" "INFO" "Checking ${#CMDS[*]} commands."
+  log_info "${FUNCNAME[0]}" "INFO" "Checking ${#CMDS_ARRAY[*]} commands."
   if ((cmds_missing > 0)); then
     log_info "${FUNCNAME[0]}" "INFO" "$cmds_missing commands are missing or not in PATH."
   else
@@ -71,27 +89,30 @@ function check_avail_commands () {
   fi
 
   if [ $DEBUG == "y" ]; then
-    for i in ${!CMDS[*]}; do
-       log_info "${FUNCNAME[0]}" "INFO" " $i : ${CMDS[$i]}"
+    for i in ${!CMDS_ARRAY[*]}; do
+       log_info "${FUNCNAME[0]}" "INFO" " $i : ${CMDS_ARRAY[$i]}"
     done
   fi
   return $SUCCESS
 }
 
 function is_command_available () {
+  # Checks the passed command and sees if it is listed as available
+  # Returns SUCCESS if available or FAILURE if not found or not available
+
   local command_element=""
   local command_to_check_for=$1
 
   log_info "${FUNCNAME[0]}" "INFO" "Checking on status of $1 command."
-  for command_element in ${!CMDS[*]}; do
+  for command_element in ${!CMDS_ARRAY[*]}; do
     if [[ $command_to_check_for == $command_element ]]; then
       log_info "${FUNCNAME[0]}" "INFO" "Commands $command_to_check_for found."
 
-      if [[ $TRUE == ${CMDS[$command_element]} ]]; then
-        log_info "${FUNCNAME[0]}" "INFO" "$command_to_check_for is available. ${CMDS[$command_element]}."
+      if [[ $TRUE == ${CMDS_ARRAY[$command_element]} ]]; then
+        log_info "${FUNCNAME[0]}" "INFO" "$command_to_check_for is available. ${CMDS_ARRAY[$command_element]}."
         return $SUCCESS
       else
-        log_info "${FUNCNAME[0]}" "INFO" "$command_to_check_for is not available. ${CMDS[$command_element]}."
+        log_info "${FUNCNAME[0]}" "INFO" "$command_to_check_for is not available. ${CMDS_ARRAY[$command_element]}."
         return $FAILURE
        fi
     fi
@@ -101,14 +122,20 @@ function is_command_available () {
   return $FAILURE
 }
 
+#-------------------------
+# ### System functions ###
+#-------------------------
+
 function get_disks () {
+  # Gets the disk on the system.  It tries to get the most accurate and comprehensive
+  # list of disks depending upon the commands available on the machine.
+
   log_info "${FUNCNAME[0]}" "INFO" "Generating a list of all disks on the system."
 
   is_command_available geom
   if [[ $? -eq $SUCCESS ]]; then
     log_info "${FUNCNAME[0]}" "INFO" "geom command available."
     DISKS=$(geom disk list | grep Name | awk '{print $3}')
-
   else
     command_avail lsblk;
     if [[ $? -eq $SUCCESS ]]; then
@@ -117,27 +144,57 @@ function get_disks () {
 
     else
      log_info "${FUNCNAME[0]}" "ERROR" "No disks found.  Aborting."
+     err "No disk found.  Aborting."
      exit $FAILURE
-
     fi
-
   fi
 
   LIST_OF_DISKS=$(sort <<<"${DISKS[*]}")
   if [[ -z $LIST_OF_DISKS ]]; then
     log_info "${FUNCNAME[0]}" "ERROR" "No disks found.  Aborting."
+     err "No disk found.  Aborting."
     exit $FAILURE
   fi
   return $SUCCESS
 }
 
-function print_sys_info () {
-  UPTIME=$(uptime | awk '{ print $3, $4, $5 }' | sed 's/,//g')
+function get_sys_info () {
+  # Gets systeminformation and fills in the global variables
+
+  UPTIME=$(uptime | awk '{ print $3, $4, $5 }' | sed 's/,//g' | sed 's/\r//g')
   ARCH_TYPE=$(uname -m)
   PROC_TYPE=$(uname -p)
   OS_TYPE=$(uname -s)
   OS_VER=$(uname -o)
   OS_REL=$(uname -r)
+}
+
+function print_sys_info () {
+  # Prints out simple system information
+
+  case $O_FORMAT in
+    html) 
+      print_raw "<p>"
+      print_raw "<b>Host name:       </b> $HOSTNAME"
+      print_raw "<b>System Uptime:   </b> $UPTIME" 
+      print_raw "<b>Arch Type:       </b> $ARCH_TYPE" 
+      print_raw "<b>Procesor Type:   </b> $PROC_TYPE" 
+      print_raw "<b>OS Version:      </b> $OS_VER" 
+      print_raw "<b>OS Release:      </b> $OS_REL"
+      print_raw "</p>"
+      ;;
+
+    text)
+      local fmt="%-29s%-22s%29s\n"
+      draw_separator
+      printf "$fmt" "|" "System Information" "|" >> $O_FILE
+      draw_separator
+      fmt="| %-19s%-19s %-19s%-19s|\n"
+      printf "$fmt" "Host Name:"  "$HOSTNAME"  "System Uptime:" "$UPTIME" >> $O_FILE
+      printf "$fmt" "Arch Type:"  "$ARCH_TYPE" "Procesor Type:" "$PROC_TYPE" >> $O_FILE
+      printf "$fmt" "OS Version:" "$OS_VER"    "OS Release:"    "$OS_REL" >> $O_FILE
+      draw_separator
+  esac
 
   log_info "${FUNCNAME[0]}" "INFO" "-- System Information ------------"
   log_info "${FUNCNAME[0]}" "INFO" "================================"
@@ -152,10 +209,51 @@ function print_sys_info () {
 }
 
 function log_info () {
-# NB: Should add an option to use logger to be consistent with syslog 
   if [ $DEBUG == "y" ]; then 
-    printf "%(%m-%d-%Y %H:%M:%S)T\t%s\t%s\t%s\t%s\n" $(date +%s) "$0 ${FUNCNAME[0]} $1 $2 $3"; fi; 
+    printf "%(%m-%d-%Y %H:%M:%S)T\t%s\t%s\t%s\t%s\n" $(date +%s) "$0 ${FUNCNAME[0]} $1 $2 $3"
+  fi; 
   return $SUCCESS
+}
+
+#----------------------------------
+### Text based Output Functions ###
+#----------------------------------
+function draw_separator () {
+  # Prints out a character separator line
+
+  local output_char="#"
+  local num_chars=200
+  
+#  if [[ -z $num_chars ]]; then
+#    num_chars=80
+#  fi
+
+#  if [[ -z output_char ]]; then
+#    output_char="#"
+#  fi
+
+  local output_line=$(printf "$output_char%.0s" `(seq 1 $num_chars)`; echo)
+  echo $output_line  >> ${O_FILE}
+}
+
+function draw_row () {
+  for i in "$@"; do
+    printf "%20.20s" "$i" >> ${O_FILE}
+  done
+  printf "\n" >> ${O_FILE}
+  draw_separator
+  return $SUCCESS
+}
+
+#------------------------------
+# ### HTML Output Functions ###
+#------------------------------
+function start_table () {
+  echo "<table id="storage" border=2 cellpadding=4>" >> ${O_FILE}
+}
+
+function end_table () {
+  echo "</table>" >> ${O_FILE}
 }
 
 function print_td () { 
@@ -179,16 +277,6 @@ function end_row () {
 }
 
 function print_row() {
-  expected_inputs=15
-  if [ $expected_inputs -ne $# ]; then
-    printf "%s\n" "ERROR -- ${FUNCNAME} -- Incorrect number of parameters passed."
-    printf "%s\n%s" "Number of passed parameter was: $#."  "List of parameters: "
-    for i in "$@"; do
-      printf "%s" "$i..."
-    done
-    printf "\n%s\n" "Exiting."
-    return $FAILURE
-  fi
   start_row
   for i in "$@"; do
     print_td "$i"
@@ -197,95 +285,177 @@ function print_row() {
   return $SUCCESS
 }
 
+#---------------------
+### Misc functions ###
+#---------------------
+function end_table () {
+  case $O_file in
+    html)
+     print_raw "</table>"
+     ;;
+    text)
+      draw_separator
+      ;;
+  esac
+}
+
+
 function check_paramcondition () {
   local param_to_check=$1
   local param_warn=$2
   local param_err=$3
-
-
 }
-#### Main script starts here
 
-#  Parse the command line arguments
+#-------------------------
+### Document functions ###
+#-------------------------
+
+function create_mail_header () {
+#  Create the email header
+
+  # NB: check to see if destination file can be created
+
+  (
+    echo To: $EMAIL_TO
+    echo Subject: $MAIL_SUBJECT
+    echo Content-Type: text/html
+    echo MIME-Version: 1.0
+  ) > ${O_FILE}
+  return $SUCCESS
+}
+
+function create_results_header () {
+  case $O_FORMAT in
+    html) 
+      print_raw "<!DOCTYPE html>"
+      print_raw "<html>"
+      print_raw "<head>"
+      print_raw "<style>"
+      print_raw "body {font-family: verdana, Arial, Helvetica, sans-serif; color: black;}"
+      print_raw "#storage { font-family: Trebuchet MS, Arial, Helvetica, sans-serif; border-collapse: collapse; width: 100%;}"
+      print_raw "#storage td, #storage th{ border: 1px solid #ddd; padding: 8px; text-align: right; }"
+      print_raw "#storage tr:nth-child(even){background-color: $f2f2f2;}"
+      print_raw "#storage tr:hover {background-color: #ddd;}"
+      print_raw "#storage th {padding-top:12px; padding-bottom: 12px; text-align: right; background-color: #4CAF50; color: white; }"
+      print_raw "</style>"
+      print_raw "</head>"
+      print_raw "<body>"
+      print_raw "<h1>Status for Disks Found on $HOST_NAME on $(date "+%Y-%m-%d")</h1>"
+      print_sys_info
+
+      print_raw "<table id="storage" border=2 cellpadding=4>"
+      print_row "Device" "Type" "Serial #" "Model" "Capacity" "Speed" "Current Speed" "Hours Powered On" "Start/Stop Count" \
+                "End to End Errors" "Spin Retries" "Command Timeouts" "Last Test" "Reallocated Sectors" "Temp"
+      ;;
+
+    text)
+      print_sys_info
+      fmt="%-5.5s %-7.7s %-20.20s %-20.20s %-10.10s %-8.8s %-8.8s %-10.10s %-10.10s %-10.10s %-10.10s %-10.10s %-10.10s %-10.10s %-5.5s\n"
+      printf "$fmt" "Device" "Type" "Serial #" "Model" "Capacity" "Max" "Current" "Hours" "Start/Stop" \
+                "End to End" "Spin" "Command" "Last Test" "Realloc" "Temp" >> ${O_FILE}
+      printf "$fmt" " " " " " " " " " " "Speed" "Speed" "Powered On" "Count" \
+                "Errors" "Retries" "Timeouts" "Results" "Sectors" "Temp" >> ${O_FILE}
+      draw_separator
+      ;;
+  esac
+  return $SUCCESS
+}
+
+function end_document () {
+
+#  End the HTML document properly
+  case $O_FILE in
+    html) 
+      print_raw "</body></html>" 
+      ;;
+    text) 
+      print_raw "" 
+      ;;
+  esac
+}
+
+#------------------------------
+### Main script starts here ###
+#------------------------------
+
+##### Check for min versions  #####
+if [[ $BASH_MIN_VER != $BASH_CUR_VER ]]; then
+  err "This script requires at least BASH $BASH_MIN_VER."
+  exit 1
+fi
+
 while getopts 'de:f:m:s:o:' arg; do
   case $arg in
-    d)      DEBUG="y"           ;;
-    e)      EMAIL_TO="$OPTARG"  ;;
-    f)      O_FILE="$OPTARG"    ;;
-    m)      MAIL_FILE="$OPTARG" ;;
-    s)      EMAIL_SUBJECT="$OPTARG" ;;
-    o)      O_FORMAT="$OPTARG"  ;;
-    ? | h)  printf "\n%s\n\n" "Usage: $(basename $0): [-d] [-e email address] [-f filename] [-m y/n] [-s subject] "
-            exit 1             ;;
-    :)      printf "\n\t %s %s %s" "Illegal option: " $OPTARG "requires an argument"
-            exit 1             ;;
+    d)
+      DEBUG="y"           
+      ;;
+
+    e)
+      EMAIL_TO="$OPTARG"  
+      ;;
+
+    f)
+      O_FILE="$OPTARG"    
+      ;;
+
+    m)
+      MAIL_FILE="$OPTARG"
+      ;;
+
+    s)
+      EMAIL_SUBJECT="$OPTARG"
+      ;;
+
+    o)
+      O_FORMAT="$OPTARG"
+      ;;
+
+    h)
+      printf "\n%s\n\n" "Usage: $(basename $0): [-d] [-e email address] [-f filename] [-m y | n] [-s subject] [-o html | text]"
+      exit 1
+      ;;
+
+    :)
+      printf "\n\t %s %s %s" "Illegal option: " $OPTARG "requires an argument"
+      exit 1
+      ;;
   esac
 done
 shift "$((OPTIND -1))"
 
-log_info "${FUNCNAME[0]}" "INFO" "Starting the disk check script."
+# Verify that the options are correct
+
 if test -f "$O_FILE"; then
   log_info "${FUNCNAME[0]}" "INFO" "$O_FILE exists.  Deleting."
   rm $O_FILE
 fi
 
-if [ $DEBUG == "y" ]; then print_sys_info; fi;
-
 check_avail_commands "${ALL_CMDS[@]}"
-
-#  Create the email header
-(
-echo To: $EMAIL_TO
-echo Subject: $MAIL_SUBJECT
-echo Content-Type: text/html
-echo MIME-Version: 1.0
-) > ${O_FILE}
-
-#  Create the HTML PAGE portion
-print_raw "<!DOCTYPE html>"
-print_raw "<html>"
-print_raw "<head>"
-print_raw "<style>"
-print_raw "body {font-family: verdana, Arial, Helvetica, sans-serif; color: black;}"
-print_raw "#storage { font-family: Trebuchet MS, Arial, Helvetica, sans-serif; border-collapse: collapse; width: 100%;}"
-print_raw "#storage td, #storage th{ border: 1px solid #ddd; padding: 8px; text-align: right; }"
-print_raw "#storage tr:nth-child(even){background-color: $f2f2f2;}"
-print_raw "#storage tr:hover {background-color: #ddd;}"
-print_raw "#storage th {padding-top:12px; padding-bottom: 12px; text-align: right; background-color: #4CAF50; color: white; }"
-print_raw "</style>"
-print_raw "</head>"
-print_raw "<body>"
-
-
-#  Create an HTML Table of the results.  This tends to read better on mail readers and phones than
-#  just outputing formatted text. 
-
-print_raw "<h1>Status for Disks Found on $HOST_NAME on $(date "+%Y-%m-%d")</h1>"
-print_raw "<table id="storage" border=2 cellpadding=4>"
-print_row "Device" "Type" "Serial #" "Model" "Capacity" "Speed" "Current Speed" "Hours Powered On" "Start/Stop Count" \
-          "End to End Errors" "Spin Retries" "Command Timeouts" "Last Test" "Reallocated Sectors" "Temp"
+get_sys_info
+create_mail_header
+create_results_header
+get_disks
 
 #  Cycle thrrough the disks and collect data dependent upon what type
-get_disks
 
 log_info "${FUNCNAME[0]}" "INFO" "Iterrating through disks."
 for i in $LIST_OF_DISKS 
   do
     #  Reset all the variables to blank
-    max_speed="NA"
-    cur_speed="NA"
-    ser_num="NA"
-    model="NA"
-    dev_type="NA"
-    capacity="NA"
-    pwr_on_hrs="NA"
-    start_stop_ct="NA"
-    total_seeks="NA"
-    spin_errors="NA"
-    cmd_errors="NA"
-    test_results="NA"
-    bad_sectors="NA"
-    temp="NA"
+    max_speed="    Gb/s"
+    cur_speed="    Gb/s"
+    ser_num="-"
+    model="-"
+    dev_type="UKN"
+    capacity="     xB"
+    pwr_on_hrs="-"
+    start_stop_ct="-"
+    total_seeks="-"
+    spin_errors="-"
+    cmd_errors="-"
+    test_results="-"
+    bad_sectors="-"
+    temp="-"
 
     #  Just do the smartctl call once if possible
     full_results=$(smartctl -a /dev/$i)
@@ -299,7 +469,7 @@ for i in $LIST_OF_DISKS
     elif [[ -n "${usb_dev/[ ]*\n/}" ]]; then
       dev_type="USB"      
     elif [[ -n "${offline_dev/ [ ]*\n}" ]]; then
-      dev_type="OFFLINE"
+      dev_type="O/L"
     else
       dev_type="HDD"
     fi
@@ -311,7 +481,7 @@ for i in $LIST_OF_DISKS
       HDD | SSD)
         ser_num=$(grep        'Serial Number'         <<< $full_results | awk '/Serial Number/         {print $3}')
         model=$(grep          'Device Model'          <<< $full_results | awk '/Device Model/          {print $3 $4}')
-        capacity=$(grep       'User Capacity'         <<< $full_results | awk '/User Capacity/         {print $5, $6}')
+        capacity=$(grep       'User Capacity'         <<< $full_results | awk '/User Capacity/         {print $5, $6}' | sed -e 's/^.//' -e 's/.$//')
         max_speed=$(grep      'SATA Version'          <<< $full_results | awk '/SATA Version/          {print $6, $7}')
         cur_speed=$(grep      'SATA Version'          <<< $full_results | awk '/SATA Version/          {print $9, substr($10, 1, length($10)-1)}')
         pwr_on_hrs=$(grep     'Power_On_Hours'        <<< $full_results | awk '/Power_On_Hours/        {print $10}')
@@ -330,12 +500,12 @@ for i in $LIST_OF_DISKS
       USB)
         full_results=$(smartctl -a -d scsi /dev/$i)
         model=$(grep 'Product'                        <<< $full_results | awk '/Product/               {print $2, $3, $4}')
-        capacity=$(grep       'User Capacity'         <<< $full_results | awk '/User Capacity/         {print $5, $6}')
+        capacity=$(grep       'User Capacity'         <<< $full_results | awk '/User Capacity/         {print $5, $6}' | sed -e 's/^.//' -e 's/.$//')
         ser_num=$(grep        'Vendor:'               <<< $full_results | awk '/Vendor:/               {print $3}')
         start_stop_ctq=$(grep     'Power_Cycle_Count'     <<< $full_results | awk '/Power_Cycle_Count/     {print $10}')
-        test_results="N/A"
-        bad_sectors="N/A"
-        temp="N/A"
+        test_results="-"
+        bad_sectors="-"
+        temp="-"
         ;;
 
       OFFLINE)
@@ -347,19 +517,28 @@ for i in $LIST_OF_DISKS
         ;;
     esac
 
-    #  Print out the table row
-    print_row "$i" "$dev_type" "$ser_num" "$model" "$capacity" "$max_speed" "$cur_speed" \
+    #  Print out the collected data
+    case $O_FORMAT in
+      html)
+        print_row "$i" "$dev_type" "$ser_num" "$model" "$capacity" "$max_speed" "$cur_speed" \
               "$pwr_on_hrs" "$start_stop_ct" "$total_seeks" \
               "$spin_errors" "$cmd_errors" "$test_results" "$bad_sectors" "$temp"
+        ;;
+
+      text)
+        fmt="%-5.5s %-7.7s %-20.20s %-20.20s %10.10s %-8.8s %-8.8s %10.10s %10.10s \
+             %10.10s %10.10s %-10.10s %10.10s %10.10s %5.5s\n"
+        printf "$fmt" "$i" "$dev_type" "$ser_num" "$model" "$capacity" "$max_speed" "$cur_speed" \
+               "$pwr_on_hrs" "$start_stop_ct" "$total_seeks" \
+               "$spin_errors" "$cmd_errors" "$test_results" "$bad_sectors" "$temp" \
+                >> ${O_FILE}
+        ;;
+    esac
 
  done
 
-
-print_raw "</table>"
-
-#  End the HTML document properly
-print_raw "</body>"
-print_raw "</html>"
+end_table
+end_document
 
 #  Send the file if required. 
 
