@@ -40,27 +40,9 @@ declare PROC_TYPE
 declare OS_TYPE
 declare OS_VER
 declare OS_REL
-
+declare -i NUM_CPUS
 
 ##### Functions #####
-
-function err() {
-  echo "[$(date +'%Y-%m-%dT%H:%M:%S%z')]: $@" >&2
-}
-
-#---------------------
-### File functions ###
-#---------------------
-
-function check_file_exist()
-{
-  local -r file="${1}"
-  if [[ "${file}" = '' || ! -f "${file}" ]]; then
-    return $FAILURE
-  else
-    return $SUCCESS
-  fi
-}
 
 #------------------------
 ### Command functions ### 
@@ -134,14 +116,13 @@ function get_disks () {
 
   is_command_available geom
   if [[ $? -eq $SUCCESS ]]; then
-    log_info "${FUNCNAME[0]}" "INFO" "geom command available."
+    log_info "${FUNCNAME[0]}" "INFO" "Using geom command to obtain disks on the system."
     DISKS=$(geom disk list | grep Name | awk '{print $3}')
   else
     command_avail lsblk;
     if [[ $? -eq $SUCCESS ]]; then
-      log_info "${FUNCNAME[0]}" "INFO" "lsblk command available."
+      log_info "${FUNCNAME[0]}" "INFO" "Using the lsblk command to obtain disks on the system."
       DISKS=$(lsblk -dp | grep -o '^/dev[^ ]*')
-
     else
      log_info "${FUNCNAME[0]}" "ERROR" "No disks found.  Aborting."
      err "No disk found.  Aborting."
@@ -158,20 +139,145 @@ function get_disks () {
   return $SUCCESS
 }
 
-function get_sys_info () {
-  # Gets systeminformation and fills in the global variables
+function get_disk_info () {
+  # Cycle thrrough the disks and collect data dependent upon what type
+  log_info "${FUNCNAME[0]}" "INFO" "Iterrating through disks."
 
+  for i in $LIST_OF_DISKS 
+    do
+      # Reset all the variables to blank
+      local max_speed="    Gb/s"
+      local cur_speed="    Gb/s"
+      local ser_num="-"
+      local model="-"
+      local dev_type="UKN"
+      local capacity="     xB"
+      local pwr_local on_hrs="-"
+      local start_stop_ct="-"
+      local total_seeks="-"
+      local spin_errors="-"
+      local cmd_errors="-"
+      local test_results="-"
+      local bad_sectors="-"
+      local temp="-"
+
+      full_results=$(smartctl -a /dev/$i)
+      ssd_dev=$(grep 'Solid State Device' <<< $full_results)
+      usb_dev=$(grep 'USB bridge' <<< $full_results)
+      offline_dev=$(grep 'INQUIRY failed' <<< $full_results)
+
+      if [[ -n "${ssd_dev/[ ]*\n}" ]]; then
+        dev_type="SSD"
+      elif [[ -n "${usb_dev/[ ]*\n/}" ]]; then
+        dev_type="USB"      
+      elif [[ -n "${offline_dev/ [ ]*\n}" ]]; then
+        dev_type="O/L"
+      else
+        dev_type="HDD"
+      fi
+      log_info "${FUNCNAME[0]}" "INFO" "Examing device $i which is $dev_type device."
+
+      #  For each of the device types, collect those common SMART values that could indicate an issue 
+      #  You can find more details at https://en.wikipedia.org/wiki/S.M.A.R.T.
+      case $dev_type in
+        HDD | SSD)
+          ser_num=$(grep        'Serial Number'         <<< $full_results | awk '/Serial Number/         {print $3}')
+          model=$(grep          'Device Model'          <<< $full_results | awk '/Device Model/          {print $3 $4}')
+          capacity=$(grep       'User Capacity'         <<< $full_results | awk '/User Capacity/         {print $5, $6}' | sed -e 's/^.//' -e 's/.$//')
+          max_speed=$(grep      'SATA Version'          <<< $full_results | awk '/SATA Version/          {print $6, $7}')
+          cur_speed=$(grep      'SATA Version'          <<< $full_results | awk '/SATA Version/          {print $9, substr($10, 1, length($10)-1)}')
+          pwr_on_hrs=$(grep     'Power_On_Hours'        <<< $full_results | awk '/Power_On_Hours/        {print $10}')
+          start_stop_ct=$(grep  'Start_Stop_Count'      <<< $full_results | awk '/Start_Stop_Count/      {print $10}')
+          total_seeks=$(grep    'End-to-End'            <<< $full_results | awk '/End-to-End/            {print $10}')
+          spin_errors=$(grep    'Spin_Retry_Count'      <<< $full_results | awk '/Spin_Retry_Count/      {print $10}')
+          cmd_errors=$(grep     'Command_Timeout'       <<< $full_results | awk '/Command_Timeout/       {print $10}')
+          test_results=$(grep   'test result'           <<< $full_results | awk '/test result/           {print $6}')
+          bad_sectors=$(grep    'Reallocated_Sector_Ct' <<< $full_results | awk '/Reallocated_Sector_Ct/ {print $10}')
+          temp=$(grep           'Temperature_Celsius'   <<< $full_results | awk '/Temperature_Celsius/   {print $10}')
+          ;;
+ 
+        SSD)
+          ;;
+
+        USB)
+: '
+          full_results=$(smartctl -a -d scsi /dev/$i)
+          model=$(grep 'Product' <<< $full_results | awk '/Product/ {print $2, $3, $4}')
+          capacity=$(grep 'User Capacity' <<< $full_results | awk '/User Capacity/ {print $5, $6}' | sed -e 's/^.//' -e 's/.$//')
+          ser_num=$(grep 'Vendor:' <<< $full_results | awk '/Vendor:/ {print $3}')
+          start_stop_ctq=$(grep 'Power_Cycle_Count' <<< $full_results | awk '/Power_Cycle_Count/ {print $10}')
+          test_results="-"
+          bad_sectors="-"
+          temp="-"
+'
+          ;;
+
+        OFFLINE)
+          log_info "${FUNCNAME[0]}" "INFO" "Disk is offline."
+          ;;
+
+        *)
+          log_info "${FUNCNAME[0]}" "INFO" "Unknown disk type"
+          ;;
+      esac
+
+      case $O_FORMAT in
+        html)
+          print_row "$i" "$dev_type" "$ser_num" "$model" "$capacity" "$max_speed" "$cur_speed" \
+                    "$pwr_on_hrs" "$start_stop_ct" "$total_seeks" \
+                    "$spin_errors" "$cmd_errors" "$test_results" "$bad_sectors" "$temp"
+          ;;
+
+      text)
+          fmt="| %-6.6s | %-7.7s | %-20.20s | %-20.20s | %10.10s | %-8.8s | %-8.8s | %10.10s | %10.10s | %10.10s | %10.10s | %10.10s | %10.10s | %10.10s | %5.5s |\n"
+          printf "$fmt" "$i" "$dev_type" "$ser_num" "$model" "$capacity" "$max_speed" \
+                        "$cur_speed" "$pwr_on_hrs" "$start_stop_ct" "$total_seeks" "$spin_errors" \
+                        "$cmd_errors" "$test_results" "$bad_sectors" "$temp" \
+                        >> ${O_FILE}
+          ;;
+      esac
+  done
+  return $SUCCESS
+}
+
+function get_cpu_count () {
+  log_info "${FUNCNAME[0]}" "INFO" "Checking for cpu count under $OS_TYPE"
+  case $OS_TYPE in
+    FreeBSD)
+      NUM_CPUS=$(sysctl -n hw.ncpu)
+      ;;
+    Linux)
+      NUM_CPUS=$(grep -c '^processor' /proc/cpuinfo)
+      ;;
+  esac
+  log_info "${FUNCNAME[0]}" "INFO" "Number of cpus found is: $NUM_CPUS"
+  return $SUCCESS
+}
+
+function get_system_temp () {
+  case $OS_TYPE in
+    FreeBSD)
+      CPU_TEMP=0
+      ;;
+    Linux)
+      CPU_TEMP=0
+      ;;
+  esac
+  return $SUCCESS
+}
+
+function get_sys_info () {
   UPTIME=$(uptime | awk '{ print $3, $4, $5 }' | sed 's/,//g' | sed 's/\r//g')
   ARCH_TYPE=$(uname -m)
   PROC_TYPE=$(uname -p)
   OS_TYPE=$(uname -s)
   OS_VER=$(uname -o)
   OS_REL=$(uname -r)
+  return $SUCCESS
 }
 
 function print_sys_info () {
   # Prints out simple system information
-
   case $O_FORMAT in
     html) 
       print_raw "<p>"
@@ -185,26 +291,27 @@ function print_sys_info () {
       ;;
 
     text)
-      local fmt="%-29s%-22s%29s\n"
-      draw_separator
-      printf "$fmt" "|" "System Information" "|" >> $O_FILE
-      draw_separator
-      fmt="| %-19s%-19s %-19s%-19s|\n"
-      printf "$fmt" "Host Name:"  "$HOSTNAME"  "System Uptime:" "$UPTIME" >> $O_FILE
-      printf "$fmt" "Arch Type:"  "$ARCH_TYPE" "Procesor Type:" "$PROC_TYPE" >> $O_FILE
-      printf "$fmt" "OS Version:" "$OS_VER"    "OS Release:"    "$OS_REL" >> $O_FILE
+      local fmt="%-60.60s%-60.60s%60.60s\n"
+      printf "%s\n" "============================" >> ${O_FILE}
+      printf "%s\n" "    System Information" >> $O_FILE
+      printf "%s\n" "============================" >> ${O_FILE}
+      printf "%s\n" "Host Name:     $HOSTNAME" >> ${O_FILE}
+      printf "%s\n" "System Uptime: $UPTIME" >> $O_FILE
+      printf "%s\n" "Arch Type:     $ARCH_TYPE" >> ${O_FILE}
+      printf "%s\n" "Procesor Type: $PROC_TYPE" >> $O_FILE
+      printf "%s\n" "OS Version:    $OS_VER" >> ${O_FILE}
+      printf "%s\n" "OS Release:    $OS_REL" >> $O_FILE
       draw_separator
   esac
 
-  log_info "${FUNCNAME[0]}" "INFO" "-- System Information ------------"
-  log_info "${FUNCNAME[0]}" "INFO" "================================"
-  log_info "${FUNCNAME[0]}" "INFO" "Host Name:      $HOSTNAME"
-  log_info "${FUNCNAME[0]}" "INFO" "System Uptime:  $UPTIME"
-  log_info "${FUNCNAME[0]}" "INFO" "Arch Type:      $ARCH_TYPE"
-  log_info "${FUNCNAME[0]}" "INFO" "Procesor Type:  $PROC_TYPE"
-  log_info "${FUNCNAME[0]}" "INFO" "OS Version:     $OS_VER"
-  log_info "${FUNCNAME[0]}" "INFO" "OS Release:     $OS_REL"  
-  log_info "${FUNCNAME[0]}" "INFO" "================================"
+  get_cpu_count
+  log_info "${FUNCNAME[0]}" "INFO" "----------------- System Information -----------------------"
+  log_info "${FUNCNAME[0]}" "INFO" "============================================================"
+  log_info "${FUNCNAME[0]}" "INFO" "Host Name:  $HOSTNAME       System Uptime: $UPTIME          "
+  log_info "${FUNCNAME[0]}" "INFO" "Arch Type:  $ARCH_TYPE      Procesor Type: $PROC_TYPE       "
+  log_info "${FUNCNAME[0]}" "INFO" "OS Version: $OS_VER         OS Release:    $OS_REL          "  
+  log_info "${FUNCNAME[0]}" "INFO" "CPU Count:  $NUM_CPUS                                       "
+  log_info "${FUNCNAME[0]}" "INFO" "============================================================"
   return $SUCCESS
 }
 
@@ -216,22 +323,11 @@ function log_info () {
 }
 
 #----------------------------------
-### Text based Output Functions ###
+# Text based Output Functions 
 #----------------------------------
 function draw_separator () {
-  # Prints out a character separator line
-
-  local output_char="#"
-  local num_chars=200
-  
-#  if [[ -z $num_chars ]]; then
-#    num_chars=80
-#  fi
-
-#  if [[ -z output_char ]]; then
-#    output_char="#"
-#  fi
-
+  local output_char="="
+  local -i num_chars=200
   local output_line=$(printf "$output_char%.0s" `(seq 1 $num_chars)`; echo)
   echo $output_line  >> ${O_FILE}
 }
@@ -253,7 +349,14 @@ function start_table () {
 }
 
 function end_table () {
-  echo "</table>" >> ${O_FILE}
+  case $O_file in
+    html)
+     print_raw "</table>"
+     ;;
+    text)
+      draw_separator
+      ;;
+  esac
 }
 
 function print_td () { 
@@ -288,17 +391,19 @@ function print_row() {
 #---------------------
 ### Misc functions ###
 #---------------------
-function end_table () {
-  case $O_file in
-    html)
-     print_raw "</table>"
-     ;;
-    text)
-      draw_separator
-      ;;
-  esac
+function err() {
+  echo "[$(date +'%Y-%m-%dT%H:%M:%S%z')]: $@" >&2
 }
 
+function check_file_exist()
+{
+  local -r file="${1}"
+  if [[ "${file}" = '' || ! -f "${file}" ]]; then
+    return $FAILURE
+  else
+    return $SUCCESS
+  fi
+}
 
 function check_paramcondition () {
   local param_to_check=$1
@@ -312,16 +417,29 @@ function check_paramcondition () {
 
 function create_mail_header () {
 #  Create the email header
+  case $O_FORMAT in
+    html)
+      (
+       echo To: $EMAIL_TO
+       echo Subject: $MAIL_SUBJECT
+       echo Content-Type: text/html
+       echo MIME-Version: 1.0
+       echo Content-Disposition: inline
+      ) > ${O_FILE}
+      return $SUCCESS
+      ;;
 
-  # NB: check to see if destination file can be created
-
-  (
-    echo To: $EMAIL_TO
-    echo Subject: $MAIL_SUBJECT
-    echo Content-Type: text/html
-    echo MIME-Version: 1.0
-  ) > ${O_FILE}
-  return $SUCCESS
+    text)
+      (
+       echo To: $EMAIL_TO
+       echo Subject: $MAIL_SUBJECT
+       echo Content-Type: text/html
+       echo MIME-Version: 1.0
+       echo Content-Disposition: inline
+      ) > ${O_FILE}
+      return $SUCCESS
+      ;;
+   esac
 }
 
 function create_results_header () {
@@ -349,12 +467,13 @@ function create_results_header () {
       ;;
 
     text)
+      printf "%s\n" "<html><body><pre style='font: monospace'>" >> ${O_FILE}
       print_sys_info
-      fmt="%-5.5s %-7.7s %-20.20s %-20.20s %-10.10s %-8.8s %-8.8s %-10.10s %-10.10s %-10.10s %-10.10s %-10.10s %-10.10s %-10.10s %-5.5s\n"
-      printf "$fmt" "Device" "Type" "Serial #" "Model" "Capacity" "Max" "Current" "Hours" "Start/Stop" \
+      fmt="| %-6.6s | %-7.7s | %-20.20s | %-20.20s | %-10.10s | %-8.8s | %-8.8s | %-10.10s | %-10.10s | %-10.10s | %-10.10s | %-10.10s | %-10.10s | %-10.10s | %-5.5s |\n"
+      printf "$fmt" " " " " " " " " " " "Max" "Current" "Hours" "Start/Stop" \
                 "End to End" "Spin" "Command" "Last Test" "Realloc" "Temp" >> ${O_FILE}
-      printf "$fmt" " " " " " " " " " " "Speed" "Speed" "Powered On" "Count" \
-                "Errors" "Retries" "Timeouts" "Results" "Sectors" "Temp" >> ${O_FILE}
+      printf "$fmt" "Device" "Type" "Serial #" "Model" "Capacity" "Speed" "Speed" "Powered On" \
+             "Count" "Errors" "Retries" "Timeouts" "Results" "Sectors" "Temp" >> ${O_FILE}
       draw_separator
       ;;
   esac
@@ -362,14 +481,12 @@ function create_results_header () {
 }
 
 function end_document () {
-
-#  End the HTML document properly
   case $O_FILE in
     html) 
       print_raw "</body></html>" 
       ;;
     text) 
-      print_raw "" 
+      print_raw "</pre></body></html>" 
       ;;
   esac
 }
@@ -389,32 +506,25 @@ while getopts 'de:f:m:s:o:' arg; do
     d)
       DEBUG="y"           
       ;;
-
     e)
       EMAIL_TO="$OPTARG"  
       ;;
-
     f)
       O_FILE="$OPTARG"    
       ;;
-
     m)
       MAIL_FILE="$OPTARG"
       ;;
-
     s)
       EMAIL_SUBJECT="$OPTARG"
       ;;
-
     o)
       O_FORMAT="$OPTARG"
       ;;
-
     h)
       printf "\n%s\n\n" "Usage: $(basename $0): [-d] [-e email address] [-f filename] [-m y | n] [-s subject] [-o html | text]"
       exit 1
       ;;
-
     :)
       printf "\n\t %s %s %s" "Illegal option: " $OPTARG "requires an argument"
       exit 1
@@ -422,8 +532,6 @@ while getopts 'de:f:m:s:o:' arg; do
   esac
 done
 shift "$((OPTIND -1))"
-
-# Verify that the options are correct
 
 if test -f "$O_FILE"; then
   log_info "${FUNCNAME[0]}" "INFO" "$O_FILE exists.  Deleting."
@@ -435,113 +543,12 @@ get_sys_info
 create_mail_header
 create_results_header
 get_disks
-
-#  Cycle thrrough the disks and collect data dependent upon what type
-
-log_info "${FUNCNAME[0]}" "INFO" "Iterrating through disks."
-for i in $LIST_OF_DISKS 
-  do
-    #  Reset all the variables to blank
-    max_speed="    Gb/s"
-    cur_speed="    Gb/s"
-    ser_num="-"
-    model="-"
-    dev_type="UKN"
-    capacity="     xB"
-    pwr_on_hrs="-"
-    start_stop_ct="-"
-    total_seeks="-"
-    spin_errors="-"
-    cmd_errors="-"
-    test_results="-"
-    bad_sectors="-"
-    temp="-"
-
-    #  Just do the smartctl call once if possible
-    full_results=$(smartctl -a /dev/$i)
-    ssd_dev=$(grep 'Solid State Device' <<< $full_results)
-    usb_dev=$(grep 'USB bridge' <<< $full_results)
-    offline_dev=$(grep 'INQUIRY failed' <<< $full_results)
-
-    #  Try to classify the device type
-    if [[ -n "${ssd_dev/[ ]*\n}" ]]; then
-      dev_type="SSD"
-    elif [[ -n "${usb_dev/[ ]*\n/}" ]]; then
-      dev_type="USB"      
-    elif [[ -n "${offline_dev/ [ ]*\n}" ]]; then
-      dev_type="O/L"
-    else
-      dev_type="HDD"
-    fi
-    log_info "${FUNCNAME[0]}" "INFO" "Examing device $i which is $dev_type device."
-
-    #  For each of the device types, collect those common SMART values that could indicate an issue 
-    #  You can find more details at https://en.wikipedia.org/wiki/S.M.A.R.T.
-    case $dev_type in
-      HDD | SSD)
-        ser_num=$(grep        'Serial Number'         <<< $full_results | awk '/Serial Number/         {print $3}')
-        model=$(grep          'Device Model'          <<< $full_results | awk '/Device Model/          {print $3 $4}')
-        capacity=$(grep       'User Capacity'         <<< $full_results | awk '/User Capacity/         {print $5, $6}' | sed -e 's/^.//' -e 's/.$//')
-        max_speed=$(grep      'SATA Version'          <<< $full_results | awk '/SATA Version/          {print $6, $7}')
-        cur_speed=$(grep      'SATA Version'          <<< $full_results | awk '/SATA Version/          {print $9, substr($10, 1, length($10)-1)}')
-        pwr_on_hrs=$(grep     'Power_On_Hours'        <<< $full_results | awk '/Power_On_Hours/        {print $10}')
-        start_stop_ct=$(grep  'Start_Stop_Count'      <<< $full_results | awk '/Start_Stop_Count/      {print $10}')
-        total_seeks=$(grep    'End-to-End'            <<< $full_results | awk '/End-to-End/            {print $10}')
-        spin_errors=$(grep    'Spin_Retry_Count'      <<< $full_results | awk '/Spin_Retry_Count/      {print $10}')
-        cmd_errors=$(grep     'Command_Timeout'       <<< $full_results | awk '/Command_Timeout/       {print $10}')
-        test_results=$(grep   'test result'           <<< $full_results | awk '/test result/           {print $6}')
-        bad_sectors=$(grep    'Reallocated_Sector_Ct' <<< $full_results | awk '/Reallocated_Sector_Ct/ {print $10}')
-        temp=$(grep           'Temperature_Celsius'   <<< $full_results | awk '/Temperature_Celsius/   {print $10}')
-        ;;
- 
-      SSD)
-        ;;
-
-      USB)
-        full_results=$(smartctl -a -d scsi /dev/$i)
-        model=$(grep 'Product'                        <<< $full_results | awk '/Product/               {print $2, $3, $4}')
-        capacity=$(grep       'User Capacity'         <<< $full_results | awk '/User Capacity/         {print $5, $6}' | sed -e 's/^.//' -e 's/.$//')
-        ser_num=$(grep        'Vendor:'               <<< $full_results | awk '/Vendor:/               {print $3}')
-        start_stop_ctq=$(grep     'Power_Cycle_Count'     <<< $full_results | awk '/Power_Cycle_Count/     {print $10}')
-        test_results="-"
-        bad_sectors="-"
-        temp="-"
-        ;;
-
-      OFFLINE)
-        log_info "${FUNCNAME[0]}" "INFO" "Disk is offline."
-        ;;
-
-      *)
-        log_info "${FUNCNAME[0]}" "INFO" "Unknown disk type"
-        ;;
-    esac
-
-    #  Print out the collected data
-    case $O_FORMAT in
-      html)
-        print_row "$i" "$dev_type" "$ser_num" "$model" "$capacity" "$max_speed" "$cur_speed" \
-              "$pwr_on_hrs" "$start_stop_ct" "$total_seeks" \
-              "$spin_errors" "$cmd_errors" "$test_results" "$bad_sectors" "$temp"
-        ;;
-
-      text)
-        fmt="%-5.5s %-7.7s %-20.20s %-20.20s %10.10s %-8.8s %-8.8s %10.10s %10.10s \
-             %10.10s %10.10s %-10.10s %10.10s %10.10s %5.5s\n"
-        printf "$fmt" "$i" "$dev_type" "$ser_num" "$model" "$capacity" "$max_speed" "$cur_speed" \
-               "$pwr_on_hrs" "$start_stop_ct" "$total_seeks" \
-               "$spin_errors" "$cmd_errors" "$test_results" "$bad_sectors" "$temp" \
-                >> ${O_FILE}
-        ;;
-    esac
-
- done
+get_disk_info
 
 end_table
 end_document
 
 #  Send the file if required. 
-
 if [ $MAIL_FILE != "n" ]
 then
   log_info "${FUNCNAME[0]}" "INFO" "Sending the report to $EMAIL_TO"
@@ -550,17 +557,8 @@ else
   log_info "${FUNCNAME[0]}" "INFO" "Not sending file"
 fi
 
-#  Clean up 
 log_info "${FUNCNAME[0]}" "INFO" "Cleaning up."
-
-if [ $DEBUG = "n" ]
-then
-  log_info "${FUNCNAME[0]}" "INFO" "Deleting $O_FILE."
-  rm $O_FILE
-fi
-
 log_info "${FUNCNAME[0]}" "INFO" "Ending the disk checking script"
-
 exit $SUCCESS
 
 
