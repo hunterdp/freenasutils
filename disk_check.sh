@@ -6,7 +6,7 @@
 #   where:
 #     -d                             turn on debug
 #     -e email_address               email address to send the file to
-#     -f filename                    filename to 
+#     -f filename                    filename to
 #     -m y|n                         mail the file or not
 #     -s "subject"                   subject of email
 #     -o html|text                   output in either html or formatted text
@@ -24,7 +24,30 @@ declare -r BASH_MIN_VER="4"
 declare -r BASH_CUR_VER=$(bash --version | grep 'GNU bash' | awk '{print substr($4,1,1)}')
 
 ##### Global Variables #####
+# An assoicative array that holds system commands and if they are available on the system
 declare -A CMDS_ARRAY
+
+# An associative array of system attributes and their values.  Note that we do prepopulate
+# the array with common values we should be able to collect.  NB: That additional K/V pairs
+# can be added onto (aka: multiple CPU stats)
+declare -A SYS_INFO
+SYS_INFO=( [HOSTNAME]= \
+           [UPTIME]= \
+           [ARCH_TYPE]= \
+           [PROC_TYPE]= \
+           [OS_TYPE]= \
+           [OS_VER]= \
+           [OS_REL]= \
+           [NCPUS]= \
+           [CORE_TEMP]= \
+           [HOST_IP]= \
+           [BIOS_VENDOR]= \
+           [BIOS_VER]= \
+           [BIOS_REL_DATE]= \
+           [BIOS_REV]= \
+           [FIRMWARE_REV]= \
+          )
+
 declare -l DEBUG="n"
 declare -l MAIL_FILE="y"
 declare -l O_FORMAT="html"
@@ -44,8 +67,10 @@ declare -i NUM_CPUS
 
 ##### Functions #####
 
+
+
 #------------------------
-### Command functions ### 
+### Command functions ###
 #------------------------
 function check_avail_commands () {
   # Looks to see if the commands in the array passed are available on the system
@@ -143,7 +168,7 @@ function get_disk_info () {
   # Cycle thrrough the disks and collect data dependent upon what type
   log_info "${FUNCNAME[0]}" "INFO" "Iterrating through disks."
 
-  for i in $LIST_OF_DISKS 
+  for i in $LIST_OF_DISKS
     do
       # Reset all the variables to blank
       local max_speed="    Gb/s"
@@ -169,7 +194,7 @@ function get_disk_info () {
       if [[ -n "${ssd_dev/[ ]*\n}" ]]; then
         dev_type="SSD"
       elif [[ -n "${usb_dev/[ ]*\n/}" ]]; then
-        dev_type="USB"      
+        dev_type="USB"
       elif [[ -n "${offline_dev/ [ ]*\n}" ]]; then
         dev_type="O/L"
       else
@@ -177,7 +202,7 @@ function get_disk_info () {
       fi
       log_info "${FUNCNAME[0]}" "INFO" "Examing device $i which is $dev_type device."
 
-      #  For each of the device types, collect those common SMART values that could indicate an issue 
+      #  For each of the device types, collect those common SMART values that could indicate an issue
       #  You can find more details at https://en.wikipedia.org/wiki/S.M.A.R.T.
       case $dev_type in
         HDD | SSD)
@@ -195,7 +220,7 @@ function get_disk_info () {
           bad_sectors=$(grep    'Reallocated_Sector_Ct' <<< $full_results | awk '/Reallocated_Sector_Ct/ {print $10}')
           temp=$(grep           'Temperature_Celsius'   <<< $full_results | awk '/Temperature_Celsius/   {print $10}')
           ;;
- 
+
         SSD)
           ;;
 
@@ -245,6 +270,8 @@ function get_cpu_count () {
   case $OS_TYPE in
     FreeBSD)
       NUM_CPUS=$(sysctl -n hw.ncpu)
+      PHYS_MEM=$(sysctl -n hw.physmem)
+      HW_MODEL=$(sysctl -n hw.model)
       ;;
     Linux)
       NUM_CPUS=$(grep -c '^processor' /proc/cpuinfo)
@@ -267,25 +294,39 @@ function get_system_temp () {
 }
 
 function get_sys_info () {
+  # Collects various system information  and stores it in the global array.
+  # NB:  If KV pair not found, it will assume its a new one andpopo it onto
+  # the array.
+
   UPTIME=$(uptime | awk '{ print $3, $4, $5 }' | sed 's/,//g' | sed 's/\r//g')
   ARCH_TYPE=$(uname -m)
   PROC_TYPE=$(uname -p)
   OS_TYPE=$(uname -s)
   OS_VER=$(uname -o)
   OS_REL=$(uname -r)
+
+  SYS_INFO[HOSTNAME]=$HOSTNAME
+  SYS_INFO[UPTIME]=$UPTIME
+  SYS_INFO[ARCH_TYPE]=$(uname -m)
+  SYS_INFO[PROC_TYPE]=$(uname -p)
+  SYS_INFO[OS_TYPE]=$(uname -s)
+  SYS_INFO[OS_VER]=$(uname -o)
+  SYS_INFO[OS_REL]=$(uname -r)
+
   return $SUCCESS
+
 }
 
 function print_sys_info () {
   # Prints out simple system information
   case $O_FORMAT in
-    html) 
+    html)
       print_raw "<p>"
       print_raw "<b>Host name:       </b> $HOSTNAME"
-      print_raw "<b>System Uptime:   </b> $UPTIME" 
-      print_raw "<b>Arch Type:       </b> $ARCH_TYPE" 
-      print_raw "<b>Procesor Type:   </b> $PROC_TYPE" 
-      print_raw "<b>OS Version:      </b> $OS_VER" 
+      print_raw "<b>System Uptime:   </b> $UPTIME"
+      print_raw "<b>Arch Type:       </b> $ARCH_TYPE"
+      print_raw "<b>Procesor Type:   </b> $PROC_TYPE"
+      print_raw "<b>OS Version:      </b> $OS_VER"
       print_raw "<b>OS Release:      </b> $OS_REL"
       print_raw "</p>"
       ;;
@@ -307,23 +348,59 @@ function print_sys_info () {
   get_cpu_count
   log_info "${FUNCNAME[0]}" "INFO" "----------------- System Information -----------------------"
   log_info "${FUNCNAME[0]}" "INFO" "============================================================"
-  log_info "${FUNCNAME[0]}" "INFO" "Host Name:  $HOSTNAME       System Uptime: $UPTIME          "
+  log_info "${FUNCNAME[0]}" "INFO" "Host Name:  ${SYS_INFO[HOSTNAME]}       System Uptime: $UPTIME          "
   log_info "${FUNCNAME[0]}" "INFO" "Arch Type:  $ARCH_TYPE      Procesor Type: $PROC_TYPE       "
-  log_info "${FUNCNAME[0]}" "INFO" "OS Version: $OS_VER         OS Release:    $OS_REL          "  
+  log_info "${FUNCNAME[0]}" "INFO" "OS Version: $OS_VER         OS Release:    $OS_REL          "
   log_info "${FUNCNAME[0]}" "INFO" "CPU Count:  $NUM_CPUS                                       "
   log_info "${FUNCNAME[0]}" "INFO" "============================================================"
   return $SUCCESS
 }
 
 function log_info () {
-  if [ $DEBUG == "y" ]; then 
+  if [ $DEBUG == "y" ]; then
     printf "%(%m-%d-%Y %H:%M:%S)T\t%s\t%s\t%s\t%s\n" $(date +%s) "$0 ${FUNCNAME[0]} $1 $2 $3"
-  fi; 
+  fi;
   return $SUCCESS
 }
 
+function die() {
+  local frame=0
+  while caller $frame; do
+    ((frame++));
+  done
+  echo "$*"
+  exit 1
+}
+
+function get_cmd_args () {
+  log_info "${FUNCNAME[0]}" "INFO" "Getting command line arugments $@."
+  local getopts
+  while getopts 'hde:f:m:s:o:' arg; do
+    case $arg in
+      d) DEBUG="y"
+         ;;
+      e) EMAIL_TO="$OPTARG"
+         ;;
+      f) O_FILE="$OPTARG"
+         ;;
+      m) MAIL_FILE="$OPTARG"
+         ;;
+      s) EMAIL_SUBJECT="$OPTARG"
+         ;;
+      o) O_FORMAT="$OPTARG"
+         ;;
+      h)
+        printf "\n%s\n\n" "Usage: $(basename $0): [-d] [-e email address] [-f filename] [-m y | n] [-s subject] [-o html | text]"
+        exit $SUCESS
+        ;;
+    esac
+  done
+  shift "$((OPTIND -1))"
+}
+
+
 #----------------------------------
-# Text based Output Functions 
+# Text based Output Functions
 #----------------------------------
 function draw_separator () {
   local output_char="="
@@ -359,24 +436,24 @@ function end_table () {
   esac
 }
 
-function print_td () { 
-  echo "<td>$1</td>" >> ${O_FILE}; 
-  return $SUCCESS; 
+function print_td () {
+  echo "<td>$1</td>" >> ${O_FILE};
+  return $SUCCESS;
 }
 
-function print_raw () { 
-  echo $1 >> ${O_FILE}; 
-  return $SUCCESS 
+function print_raw () {
+  echo $1 >> ${O_FILE};
+  return $SUCCESS
 }
 
-function start_row () { 
-  echo "<tr>" >> ${O_FILE}; 
-  return $SUCCESS 
+function start_row () {
+  echo "<tr>" >> ${O_FILE};
+  return $SUCCESS
 }
 
-function end_row () { 
+function end_row () {
   echo "</tr>" >> ${O_FILE};
-  return $SUCCESS 
+  return $SUCCESS
 }
 
 function print_row() {
@@ -482,11 +559,11 @@ function create_results_header () {
 
 function end_document () {
   case $O_FILE in
-    html) 
-      print_raw "</body></html>" 
+    html)
+      print_raw "</body></html>"
       ;;
-    text) 
-      print_raw "</pre></body></html>" 
+    text)
+      print_raw "</pre></body></html>"
       ;;
   esac
 }
@@ -498,40 +575,14 @@ function end_document () {
 ##### Check for min versions  #####
 if [[ $BASH_MIN_VER != $BASH_CUR_VER ]]; then
   err "This script requires at least BASH $BASH_MIN_VER."
-  exit 1
+  die 
 fi
 
-while getopts 'de:f:m:s:o:' arg; do
-  case $arg in
-    d)
-      DEBUG="y"           
-      ;;
-    e)
-      EMAIL_TO="$OPTARG"  
-      ;;
-    f)
-      O_FILE="$OPTARG"    
-      ;;
-    m)
-      MAIL_FILE="$OPTARG"
-      ;;
-    s)
-      EMAIL_SUBJECT="$OPTARG"
-      ;;
-    o)
-      O_FORMAT="$OPTARG"
-      ;;
-    h)
-      printf "\n%s\n\n" "Usage: $(basename $0): [-d] [-e email address] [-f filename] [-m y | n] [-s subject] [-o html | text]"
-      exit 1
-      ;;
-    :)
-      printf "\n\t %s %s %s" "Illegal option: " $OPTARG "requires an argument"
-      exit 1
-      ;;
-  esac
-done
-shift "$((OPTIND -1))"
+get_cmd_args "$@"
+if  [[ "$?" == $FAILURE ]]; then
+  die 
+fi
+
 
 if test -f "$O_FILE"; then
   log_info "${FUNCNAME[0]}" "INFO" "$O_FILE exists.  Deleting."
@@ -544,11 +595,10 @@ create_mail_header
 create_results_header
 get_disks
 get_disk_info
-
 end_table
 end_document
 
-#  Send the file if required. 
+#  Send the file if required.
 if [ $MAIL_FILE != "n" ]
 then
   log_info "${FUNCNAME[0]}" "INFO" "Sending the report to $EMAIL_TO"
@@ -563,30 +613,31 @@ exit $SUCCESS
 
 
 
-    #  Reallocated Sectors Count            Count of reallocated sectors. The raw value represents a 
-    #                                          count of the bad sectors that have been found and remapped. 
-    #                                          Thus, the higher the attribute value, the more sectors the 
-    #                                          drive has had to reallocate. This value is primarily used as 
-    #                                          a metric of the life expectancy of the drive; a drive which 
-    #                                          has had any reallocations at all is significantly more likely 
-    #                                          to fail in the immediate months
+    #  Reallocated Sectors Count            Count of reallocated sectors. The raw value represents a
+    #                                       count of the bad sectors that have been found and remapped.
+    #                                       Thus, the higher the attribute value, the more sectors the
+    #                                       drive has had to reallocate. This value is primarily used as
+    #                                       a metric of the life expectancy of the drive; a drive which
+    #                                       has had any reallocations at all is significantly more likely
+    #                                       to fail in the immediate months
     #
     #  Spin Retry Count                     Count of retry of spin start attempts. This attribute stores
-    #                                          a total count of the spin start attempts to reach the fully 
-    #                                          operational speed (under the condition that the first attempt 
-    #                                          was unsuccessful). An increase of this attribute value is a 
-    #                                          sign of problems in the hard disk mechanical subsystem.
+    #                                       a total count of the spin start attempts to reach the fully
+    #                                       operational speed (under the condition that the first attempt
+    #                                       was unsuccessful). An increase of this attribute value is a
+    #                                       sign of problems in the hard disk mechanical subsystem.
     #
     #  End-to-End error / IOEDC             This attribute is a part of Hewlett-Packard's SMART IV technology,
-    #                                          as well as part of other vendors' IO Error Detection and 
-    #                                          Correction schemas, and it contains a count of parity errors which
-    #                                          occur in the data path to the media via the drive's cache RAM.
+    #                                       as well as part of other vendors' IO Error Detection and
+    #                                       Correction schemas, and it contains a count of parity errors which
+    #                                       occur in the data path to the media via the drive's cache RAM.
     #
     #  Reported Uncorrectable Errors        The count of errors that could not be recovered using hardware ECC.
     #
-    #  Command Timeout                      The count of aborted operations due to HDD timeout. Normally this 
-    #                                          attribute value should be equal to zero
+    #  Command Timeout                      The count of aborted operations due to HDD timeout. Normally this
+    #                                       attribute value should be equal to zero
     #
-    #  Reallocation Event Count             Count of remap operations. The raw value of this attribute shows 
-    #                                          the total count of attempts to transfer data from reallocated 
-    #                                          sectors to a spare area. Both successful and unsuccessful attempts are counted
+    #  Reallocation Event Count             Count of remap operations. The raw value of this attribute shows
+    #                                       the total count of attempts to transfer data from reallocated
+    #                                       sectors to a spare area. Both successful and unsuccessful
+    #                                       attempts are counted
