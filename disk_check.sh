@@ -1,6 +1,8 @@
 #!/bin/bash
 #   A simple script to collect some information about the disks on a Linux, FreeBSD or NetBSD server.  The data
-#   is stored in a file and setup to enable mailing of the file.
+#   is stored in a file and setup to enable mailing of the file.  I did this to brush up on my bash scrpting skills,
+#   so there may be some simplier and easier ways to do some things, but I tried to varies ways to learn more
+#
 # Usage:
 #   sh disk_check.sh command arguments
 #   where:
@@ -10,37 +12,63 @@
 #     -m y|n                         mail the file or not
 #     -s "subject"                   subject of email
 #     -o html|text                   output in either html or formatted text
+#     -t long|short                  how much detail to include
+#     -v                             prints out version of program
+#
+# Prerequisites:
+#  - smartmon tools must be installed in order to use smartctl
+#  - mmc-utils if host has eMMC cards
 #####
 
+## ToDo:
+#    - Need to add capability to read SD cards (raspberry pi)  Info is located at
+#      sys/block/mmcblk#.  Also can try the udevadm -a -c /dev/mmcblk# command
+#    - Need to add ability to get information about virtual disks
+
 ##### Constants #####
+declare -r AUTHOR="David Hunter"
+declare -r VERSION="Version 0.5 beta"
+declare -r PROG_NAME="disk_check.sh"
 declare -r TRUE="YES"
 declare -r FALSE="NO"
-declare -r FAILURE=1
-declare -r SUCCESS=0
-declare -r REQ_CMDS="awk uname hostname smartctl uptime hostname hash"
+declare -r -i FAILURE=1
+declare -r -i SUCCESS=0
+declare -r REQ_CMDS="awk uname hostname smartctl uptime hostname hash wc"
 declare -r OPT_CMDS="geom lsblk dmidecode lshw blkid sysctl pr column"
 declare -r ALL_CMDS="$REQ_CMDS $OPT_CMDS"
-declare -r BASH_MIN_VER="4"
-declare -r BASH_CUR_VER=$(bash --version | grep 'GNU bash' | awk '{print substr($4,1,1)}')
+declare -r -i BASH_MIN_VER=4
+declare -r -i BASH_CUR_VER=$(bash --version | grep 'GNU bash' | awk '{print substr($4,1,1)}')
 
 ##### Global Variables #####
-# An assoicative array that holds system commands and if they are available on the system
+declare -g DEBUG="n"
+declare -g MAIL_FILE="y"
+declare -g O_FORMAT="html"
+declare -g O_FILE="/tmp/disk_overview.html"
+declare -g EMAIL_TO="user@company.com"
+declare -g HOST_NAME=$(hostname -f | tr '[:lower:]' '[:upper:]')
+declare -g MAIL_SUBJECT="FreeNAS SMART and Disk Summary for $HOST_NAME on $(date)"
+declare -g DISKS=""
+declare -g LIST_OF_DISKS=""
+
+# An assoicative array (sometimes called a dictionary) that holds system commands and if
+# they are available on the system.  This will get filled in the commands are tested.
 declare -A CMDS_ARRAY
 
 # An associative array of system attributes and their values.  Note that we do prepopulate
 # the array with common values we should be able to collect.  NB: That additional K/V pairs
 # can be added onto (aka: multiple CPU stats)
 declare -A SYS_INFO
-SYS_INFO=( [HOSTNAME]= \
-           [UPTIME]= \
-           [ARCH_TYPE]= \
-           [PROC_TYPE]= \
+SYS_INFO=( [HOST_NAME]= \
+           [HOST_UPTIME]= \
+           [HOST_IP_NUMBER]= \
+           [HOST_IP]= \
            [OS_TYPE]= \
            [OS_VER]= \
            [OS_REL]= \
-           [NCPUS]= \
-           [CORE_TEMP]= \
-           [HOST_IP]= \
+           [CPU_ARCH_TYPE]= \
+           [CPU_PROC_TYPE]= \
+           [CPU_NUMBER]= \
+           [HOST_CORE_TEMP]= \
            [BIOS_VENDOR]= \
            [BIOS_VER]= \
            [BIOS_REL_DATE]= \
@@ -48,34 +76,100 @@ SYS_INFO=( [HOSTNAME]= \
            [FIRMWARE_REV]= \
           )
 
-declare -l DEBUG="n"
-declare -l MAIL_FILE="y"
-declare -l O_FORMAT="html"
-declare -l O_FILE="/tmp/disk_overview.html"
-declare EMAIL_TO="user@company.com"
-declare HOST_NAME=$(hostname -f | tr '[:lower:]' '[:upper:]')
-declare MAIL_SUBJECT="FreeNAS SMART and Disk Summary for $HOST_NAME on $(date)"
-declare DISKS=""
-declare LIST_OF_DISKS=""
-declare UPTIME
-declare ARCH_TYPE
-declare PROC_TYPE
-declare OS_TYPE
-declare OS_VER
-declare OS_REL
-declare -i NUM_CPUS
+#---------------
+# Misc functions
+#---------------
+function log_info () {
+  if [ $DEBUG == "y" ]; then
+    printf "%(%m-%d-%Y %H:%M:%S)T %-20s %-25s %-5s %s\n" $(date +%s) "$0" "$1" "$2" "$3"
+  fi;
+  return $SUCCESS
+}
 
-##### Functions #####
+function err() {
+  echo "[$(date +'%Y-%m-%dT%H:%M:%S%z')]: $@" >&2
+}
 
+function die() {
+  local frame=0
+  while caller $frame; do
+    ((frame++));
+  done
+  exit $FAILURE
+}
 
+function usage () {
+  echo "Usage: $(basename $0): [-d] [-e email address] [-f filename] [-m y | n] [-s subject] [-o html | text]"
+  exit $SUCCESS
+}
 
-#------------------------
-### Command functions ###
-#------------------------
+function get_cmd_args () {
+  # NB:  Since this is early and we do not know any options, we cannot
+  # use functions that depend upon global options being set (aka: debug)
+  # To get around for debugging, save information to local vars and
+  # after all arguments have been priocessed, call the debugging functions.
+
+  local passed_args="$*"
+  local getopts
+
+  while getopts 'vhde:f:m:s:o:' arg; do
+    case $arg in
+      d) DEBUG="y"
+         ;;
+      e) EMAIL_TO="$OPTARG"
+         ;;
+      f) O_FILE="$OPTARG"
+         ;;
+      h | \?)
+        usage
+        ;;
+      m) MAIL_FILE="$OPTARG"
+         ;;
+      s) EMAIL_SUBJECT="$OPTARG"
+         ;;
+      o) O_FORMAT="$OPTARG"
+         ;;
+      v)
+        printf "%s\n" "$PROG_NAME: $VERSION"
+        exit $SUCCESS
+        ;;
+    esac
+  done
+  shift "$((OPTIND -1))"
+
+  log_info "${FUNCNAME[0]}" "INFO" "Command line arugments passed were: $passed_args."
+}
+
+function check_file_exist()
+{
+  local -r file="${1}"
+  if [[ "${file}" = '' || ! -f "${file}" ]]; then
+    return $FAILURE
+  else
+    return $SUCCESS
+  fi
+}
+
+function check_paramcondition () {
+  # Give a parameter, its warnning and error will return the param in a color code
+  local param_to_check=$1
+  local param_warn=$2
+  local param_err=$3
+}
+
+function validate_commands () {
+  # Given a set of commands, if any are not available, exits the program.
+  for i in $1; do
+    if ! hash "$i" > /dev/null 2>&1; then
+      err "Required command $i not availabe.  Please install.\n  Exiting the program."
+      exit 1
+    fi
+    done
+}
+
 function check_avail_commands () {
   # Looks to see if the commands in the array passed are available on the system
   # and stores the results in the GLOBAL associative CMDS_ARRAY array
-
   local cmds_missing=0
   local i=''
   declare -A commands_to_check=$1
@@ -113,41 +207,36 @@ function is_command_available () {
   log_info "${FUNCNAME[0]}" "INFO" "Checking on status of $1 command."
   for command_element in ${!CMDS_ARRAY[*]}; do
     if [[ $command_to_check_for == $command_element ]]; then
-      log_info "${FUNCNAME[0]}" "INFO" "Commands $command_to_check_for found."
-
       if [[ $TRUE == ${CMDS_ARRAY[$command_element]} ]]; then
-        log_info "${FUNCNAME[0]}" "INFO" "$command_to_check_for is available. ${CMDS_ARRAY[$command_element]}."
+        log_info "${FUNCNAME[0]}" "INFO" "$command_to_check_for is available ==> ${CMDS_ARRAY[$command_element]}."
         return $SUCCESS
       else
-        log_info "${FUNCNAME[0]}" "INFO" "$command_to_check_for is not available. ${CMDS_ARRAY[$command_element]}."
+        log_info "${FUNCNAME[0]}" "INFO" "$command_to_check_for is not available ==> ${CMDS_ARRAY[$command_element]}."
         return $FAILURE
        fi
     fi
   done
-
-  log_info "${FUNCNAME[0]}" "INFO" "Commands $command_to_check_for is not found."
-  return $FAILURE
+#  return $FAILURE
 }
-
-#-------------------------
-# ### System functions ###
-#-------------------------
+#-------------------------------------------
+#  Functions dealing with all types of disks
+#-------------------------------------------
 
 function get_disks () {
   # Gets the disk on the system.  It tries to get the most accurate and comprehensive
   # list of disks depending upon the commands available on the machine.
-
   log_info "${FUNCNAME[0]}" "INFO" "Generating a list of all disks on the system."
 
+  # Figure out which command will work and get disks
   is_command_available geom
   if [[ $? -eq $SUCCESS ]]; then
     log_info "${FUNCNAME[0]}" "INFO" "Using geom command to obtain disks on the system."
     DISKS=$(geom disk list | grep Name | awk '{print $3}')
   else
-    command_avail lsblk;
+    is_command_available lsblk;
     if [[ $? -eq $SUCCESS ]]; then
       log_info "${FUNCNAME[0]}" "INFO" "Using the lsblk command to obtain disks on the system."
-      DISKS=$(lsblk -dp | grep -o '^/dev[^ ]*')
+      DISKS=$(lsblk -dp | grep -o '^/dev[^ ]*'  | sed 's/\/dev\///')
     else
      log_info "${FUNCNAME[0]}" "ERROR" "No disks found.  Aborting."
      err "No disk found.  Aborting."
@@ -170,7 +259,7 @@ function get_disk_info () {
 
   for i in $LIST_OF_DISKS
     do
-      # Reset all the variables to blank
+      # Reset all the variables to blank to prevent looping for blank results.
       local max_speed="    Gb/s"
       local cur_speed="    Gb/s"
       local ser_num="-"
@@ -190,15 +279,21 @@ function get_disk_info () {
       ssd_dev=$(grep 'Solid State Device' <<< $full_results)
       usb_dev=$(grep 'USB bridge' <<< $full_results)
       offline_dev=$(grep 'INQUIRY failed' <<< $full_results)
+      vmware_dev=$(grep 'VMware' <<< $full_results)
+      hdd_dev=$(grep 'rpm' <<< $full_results)
 
       if [[ -n "${ssd_dev/[ ]*\n}" ]]; then
         dev_type="SSD"
       elif [[ -n "${usb_dev/[ ]*\n/}" ]]; then
         dev_type="USB"
-      elif [[ -n "${offline_dev/ [ ]*\n}" ]]; then
+      elif [[ -n "${offline_dev/[ ]*\n}" ]]; then
         dev_type="O/L"
-      else
+      elif [[ -n "${vmware_dev/[ ]*\n}" ]]; then
+        dev_type="VMW"
+      elif [[ -n "${hdd_dev/[ ]*\n}" ]]; then
         dev_type="HDD"
+      else
+        dev_type="UKN"
       fi
       log_info "${FUNCNAME[0]}" "INFO" "Examing device $i which is $dev_type device."
 
@@ -224,6 +319,9 @@ function get_disk_info () {
         SSD)
           ;;
 
+        VMW)
+          ;;
+
         USB)
 : '
           full_results=$(smartctl -a -d scsi /dev/$i)
@@ -241,7 +339,7 @@ function get_disk_info () {
           log_info "${FUNCNAME[0]}" "INFO" "Disk is offline."
           ;;
 
-        *)
+        UKN)
           log_info "${FUNCNAME[0]}" "INFO" "Unknown disk type"
           ;;
       esac
@@ -265,56 +363,145 @@ function get_disk_info () {
   return $SUCCESS
 }
 
-function get_cpu_count () {
-  log_info "${FUNCNAME[0]}" "INFO" "Checking for cpu count under $OS_TYPE"
-  case $OS_TYPE in
+#--------------------------
+#  System related functions
+#--------------------------
+
+function get_cpu_info () {
+
+  SYS_INFO[CPU_ARCH_TYPE]=$(uname -m)
+  SYS_INFO[CPU_PROC_TYPE]=$(uname -p)
+
+  if [[ -z ${SYS_INFO[OS_TYPE]} ]]; then
+    log_info "${FUNCNAME[0]}" "INFO" "OS_TYPE not defined.  Calling get_os_info"
+    get_os_info
+  fi
+
+  log_info "${FUNCNAME[0]}" "INFO" "Checking for cpu count under ${SYS_INFO[OS_TYPE]}"
+  case ${SYS_INFO[OS_TYPE]} in
     FreeBSD)
-      NUM_CPUS=$(sysctl -n hw.ncpu)
-      PHYS_MEM=$(sysctl -n hw.physmem)
-      HW_MODEL=$(sysctl -n hw.model)
+      SYS_INFO[CPU_NUMBER]=$(sysctl -n hw.ncpu)
+      SYS_INFO[CPU_MODEL]=$(sysctl -n hw.model)
+      SYS_INFO[HOST_PHYS_MEM]=$(sysctl -n hw.physmem)
       ;;
+
     Linux)
-      NUM_CPUS=$(grep -c '^processor' /proc/cpuinfo)
+      SYSINFO[CPU_NUMBER]=$(grep -c '^processor' /proc/cpuinfo)
+      SYSINFO[CPU_MODEL]=$(grep 'model name' /proc/cpuinfo)
+      SYS_INFO[HOST_PHYS_MEM]=$(grep MemTotal /proc/meminfo)
       ;;
   esac
-  log_info "${FUNCNAME[0]}" "INFO" "Number of cpus found is: $NUM_CPUS"
+
+  log_info "${FUNCNAME[0]}" "INFO" "Number of cpus found is: ${SYS_INFO[CPU_NUMBER]}"
   return $SUCCESS
 }
 
-function get_system_temp () {
-  case $OS_TYPE in
+function get_hw_info () {
+  # Retrieve various hardware related information and store in the KV array
+
+  return $SUCCESS
+}
+
+get_bios_info () {
+  # Retrieve information about the bios
+
+  return $SUCCESS
+}
+
+function get_temps () {
+  # Tries to get temperatures of various elements (board, cpu, etc.).  
+  local i
+  local -i num_cpu_temps=0
+  local cpu_temps
+
+  case ${SYS_INFO[OS_TYPE]} in
     FreeBSD)
-      CPU_TEMP=0
+#      num_cpu_temps=$(sysctl -a | grep temperature | awk '{print $2}' | wc -l)
+      cpu_temps=($(sysctl -a | grep temperature | awk '{print $2}'))
+
+      # When called it will return an array of temps depending upon the ncpus
+      # Store all the temps in [CPU_TEMP] and then add individual temps to dictionary
+      if [[ ${#cpu_temps[@]} -gt 0 ]]; then
+        SYS_INFO[CPU_TEMP]="${cpu_temps[@]}"
+        for i in "${cpu_temps[@]}"; do
+          SYS_INFO[CPU_TEMP_$num_cpu_temps]=${cpu_temps[num_cpu_temps]}
+          log_info "${FUNCNAME[0]}" "INFO" "CPU number [$num_ip_addrs] temperature is: ${SYS_INFO[CPU_TEMP_$num_cpu_temps]}."
+          ((num_cpu_temps++))
+        done
+      else
+        SYS_INFO[CPU_TEMP]="0.0"
+        log_info "${FUNCNAME[0]}" "INFO" "CPU temperature not found."
+      fi
       ;;
+
     Linux)
+      SYS_INFO[HOST_CORE_TEMP]=0
       CPU_TEMP=0
       ;;
+    # For raspberry pi use /opt/vc/bin/vcgencmd measure_temp
   esac
   return $SUCCESS
 }
 
-function get_sys_info () {
-  # Collects various system information  and stores it in the global array.
-  # NB:  If KV pair not found, it will assume its a new one andpopo it onto
-  # the array.
+function get_host_info () {
+  local ip_addrs
+  local -i num_ip_addrs=0
 
-  UPTIME=$(uptime | awk '{ print $3, $4, $5 }' | sed 's/,//g' | sed 's/\r//g')
-  ARCH_TYPE=$(uname -m)
-  PROC_TYPE=$(uname -p)
-  OS_TYPE=$(uname -s)
-  OS_VER=$(uname -o)
-  OS_REL=$(uname -r)
+  SYS_INFO[HOST_NAME]=$(hostname -f | tr '[:lower:]' '[:upper:]')
+  SYS_INFO[HOST_UPTIME]=$(uptime | awk '{ print $3, $4, $5 }' | sed 's/,//g' | sed 's/\r//g')
+  ip_addrs=($(ifconfig | grep -Eo 'inet (addr:)?([0-9]*\.){3}[0-9]*' | grep -Eo '([0-9]*\.){3}[0-9]*' | grep -v '127.0.0.1'))
+  log_info "${FUNCNAME[0]}" "INFO" "Number of host ip addresses found is: ${#ip_addrs[@]}."
+  SYS_INFO[HOST_IP_NUMBER]=${#ip_addrs[@]}
 
-  SYS_INFO[HOSTNAME]=$HOSTNAME
-  SYS_INFO[UPTIME]=$UPTIME
-  SYS_INFO[ARCH_TYPE]=$(uname -m)
-  SYS_INFO[PROC_TYPE]=$(uname -p)
+  # A system may have more than 1 ip address or interface.  Count the number and create an array with the ips.
+  # We store all the ips found in HOST_IP and if more than 1, add unique SYS_INFO[HOST_IP_x] for each.
+  if [[ ${#ip_addrs[@]} -gt 0 ]]; then
+    SYS_INFO[HOST_IP]=${ip_addrs[@]}
+    for i in "${ip_addrs[@]}"; do
+      SYS_INFO[HOST_IP_$num_ip_addrs]=${ip_addrs[num_ip_addrs]}
+      log_info "${FUNCNAME[0]}" "INFO" "IP address number [$num_ip_addrs] found is: ${SYS_INFO[HOST_IP_$num_ip_addrs]}."
+      ((num_ip_addrs++))
+    done
+  else
+    SYS_INFO[HOST_IP]="0.0.0.0"
+    log_info "${FUNCNAME[0]}" "INFO" "IP address not found, setting to ${SYS_INFO[HOST_IP]}."
+  fi
+  return $SUCCESS
+}
+
+function get_os_info () {
+  # Stores  info about the operating system in the SYS_INFO dictionary
   SYS_INFO[OS_TYPE]=$(uname -s)
   SYS_INFO[OS_VER]=$(uname -o)
   SYS_INFO[OS_REL]=$(uname -r)
 
   return $SUCCESS
+}
 
+function get_sys_info () {
+  # Collects various system information  and stores it in the global array.
+  # If KV pair not found, it will assume its a new one andpopo it onto
+  # the array.  For each value, we want to utilize a function to fill in the
+  # key-pair to allow for portability.  Ensure we collect any variables that
+  # are used to make decisions early (OS_TYPE, ARCH_TYPE, PROC_TYPE).
+  get_hw_info
+  get_os_info
+  get_bios_info
+  get_cpu_info
+  get_host_info
+  get_temps
+
+  # Dump out the SYS_INFO Dictionary but first sort by key name
+  # to make reading a bit easier.
+  if [ $DEBUG == "y" ]; then
+    local keys=`echo ${!SYS_INFO[@]} | tr ' ' '\012' | sort | tr '\012' ' '`
+    log_info "${FUNCNAME[0]}" "INFO" "Dumping the SYS_INFO Dictionary..."
+    for key in $keys; do
+      local val=${SYS_INFO[$key]}
+      log_info "${FUNCNAME[0]}" "INFO" " $key :  $val"
+    done
+  fi
+  return $SUCCESS
 }
 
 function print_sys_info () {
@@ -322,12 +509,12 @@ function print_sys_info () {
   case $O_FORMAT in
     html)
       print_raw "<p>"
-      print_raw "<b>Host name:       </b> $HOSTNAME"
-      print_raw "<b>System Uptime:   </b> $UPTIME"
-      print_raw "<b>Arch Type:       </b> $ARCH_TYPE"
-      print_raw "<b>Procesor Type:   </b> $PROC_TYPE"
-      print_raw "<b>OS Version:      </b> $OS_VER"
-      print_raw "<b>OS Release:      </b> $OS_REL"
+      print_raw "<b>Host name:       </b> ${SYS_INFO[HOST_NAME]}"
+      print_raw "<b>System Uptime:   </b> ${SYS_INFO[HOST_UPTIME]}"
+      print_raw "<b>Arch Type:       </b> ${SYS_INFO[CPU_ARCH_TYPE]}"
+      print_raw "<b>Procesor Type:   </b> ${SYS_INFO[CPU_PROC_TYPE]}"
+      print_raw "<b>OS Version:      </b> ${SYS_INFO[OS_VER]}"
+      print_raw "<b>OS Release:      </b> ${SYS_INFO[OS_REL]}"
       print_raw "</p>"
       ;;
 
@@ -336,72 +523,20 @@ function print_sys_info () {
       printf "%s\n" "============================" >> ${O_FILE}
       printf "%s\n" "    System Information" >> $O_FILE
       printf "%s\n" "============================" >> ${O_FILE}
-      printf "%s\n" "Host Name:     $HOSTNAME" >> ${O_FILE}
-      printf "%s\n" "System Uptime: $UPTIME" >> $O_FILE
-      printf "%s\n" "Arch Type:     $ARCH_TYPE" >> ${O_FILE}
-      printf "%s\n" "Procesor Type: $PROC_TYPE" >> $O_FILE
-      printf "%s\n" "OS Version:    $OS_VER" >> ${O_FILE}
-      printf "%s\n" "OS Release:    $OS_REL" >> $O_FILE
+      printf "%s\n" "Host Name:     ${SYS_INFO[HOST_NAME]}" >> ${O_FILE}
+      printf "%s\n" "System Uptime: ${SYS_INFO[HOST_UPTIME]}" >> $O_FILE
+      printf "%s\n" "Arch Type:     ${SYS_INFO[CPU_ARCH_TYPE]}" >> ${O_FILE}
+      printf "%s\n" "Procesor Type: ${SYS_INFO[CPU_PROC_TYPE]}" >> $O_FILE
+      printf "%s\n" "OS Version:    ${SYS_INFO[OS_VER]}" >> ${O_FILE}
+      printf "%s\n" "OS Release:    ${SYS_INFO[OS_REL]}" >> $O_FILE
       draw_separator
   esac
-
-  get_cpu_count
-  log_info "${FUNCNAME[0]}" "INFO" "----------------- System Information -----------------------"
-  log_info "${FUNCNAME[0]}" "INFO" "============================================================"
-  log_info "${FUNCNAME[0]}" "INFO" "Host Name:  ${SYS_INFO[HOSTNAME]}       System Uptime: $UPTIME          "
-  log_info "${FUNCNAME[0]}" "INFO" "Arch Type:  $ARCH_TYPE      Procesor Type: $PROC_TYPE       "
-  log_info "${FUNCNAME[0]}" "INFO" "OS Version: $OS_VER         OS Release:    $OS_REL          "
-  log_info "${FUNCNAME[0]}" "INFO" "CPU Count:  $NUM_CPUS                                       "
-  log_info "${FUNCNAME[0]}" "INFO" "============================================================"
   return $SUCCESS
 }
 
-function log_info () {
-  if [ $DEBUG == "y" ]; then
-    printf "%(%m-%d-%Y %H:%M:%S)T\t%s\t%s\t%s\t%s\n" $(date +%s) "$0 ${FUNCNAME[0]} $1 $2 $3"
-  fi;
-  return $SUCCESS
-}
-
-function die() {
-  local frame=0
-  while caller $frame; do
-    ((frame++));
-  done
-  echo "$*"
-  exit 1
-}
-
-function get_cmd_args () {
-  log_info "${FUNCNAME[0]}" "INFO" "Getting command line arugments $@."
-  local getopts
-  while getopts 'hde:f:m:s:o:' arg; do
-    case $arg in
-      d) DEBUG="y"
-         ;;
-      e) EMAIL_TO="$OPTARG"
-         ;;
-      f) O_FILE="$OPTARG"
-         ;;
-      m) MAIL_FILE="$OPTARG"
-         ;;
-      s) EMAIL_SUBJECT="$OPTARG"
-         ;;
-      o) O_FORMAT="$OPTARG"
-         ;;
-      h)
-        printf "\n%s\n\n" "Usage: $(basename $0): [-d] [-e email address] [-f filename] [-m y | n] [-s subject] [-o html | text]"
-        exit $SUCESS
-        ;;
-    esac
-  done
-  shift "$((OPTIND -1))"
-}
-
-
-#----------------------------------
-# Text based Output Functions
-#----------------------------------
+#----------------------------------------
+# Some simple text based Output Functions
+#----------------------------------------
 function draw_separator () {
   local output_char="="
   local -i num_chars=200
@@ -418,21 +553,21 @@ function draw_row () {
   return $SUCCESS
 }
 
-#------------------------------
-# ### HTML Output Functions ###
-#------------------------------
+#----------------------------------
+# Some simple HTML Output Functions
+#----------------------------------
 function start_table () {
   echo "<table id="storage" border=2 cellpadding=4>" >> ${O_FILE}
 }
 
 function end_table () {
-  case $O_file in
+  case $O_FORMAT in
     html)
      print_raw "</table>"
      ;;
     text)
-      draw_separator
-      ;;
+     draw_separator
+     ;;
   esac
 }
 
@@ -465,58 +600,40 @@ function print_row() {
   return $SUCCESS
 }
 
-#---------------------
-### Misc functions ###
-#---------------------
-function err() {
-  echo "[$(date +'%Y-%m-%dT%H:%M:%S%z')]: $@" >&2
-}
-
-function check_file_exist()
-{
-  local -r file="${1}"
-  if [[ "${file}" = '' || ! -f "${file}" ]]; then
-    return $FAILURE
-  else
-    return $SUCCESS
-  fi
-}
-
-function check_paramcondition () {
-  local param_to_check=$1
-  local param_warn=$2
-  local param_err=$3
-}
-
 #-------------------------
 ### Document functions ###
 #-------------------------
 
 function create_mail_header () {
 #  Create the email header
-  case $O_FORMAT in
+  (
+   echo To: $EMAIL_TO
+   echo Subject: $MAIL_SUBJECT
+   echo Content-Type: text/html
+   echo MIME-Version: 1.0
+   echo Content-Disposition: inline
+  ) > ${O_FILE}
+  return $SUCCESS
+}
+
+function create_table_header () {
+ case $O_FORMAT in
     html)
-      (
-       echo To: $EMAIL_TO
-       echo Subject: $MAIL_SUBJECT
-       echo Content-Type: text/html
-       echo MIME-Version: 1.0
-       echo Content-Disposition: inline
-      ) > ${O_FILE}
-      return $SUCCESS
+      print_raw "<table id="storage" border=2 cellpadding=4>"
+      print_row "Device" "Type" "Serial #" "Model" "Capacity" "Speed" "Current Speed" "Hours Powered On" "Start/Stop Count" \
+                "End to End Errors" "Spin Retries" "Command Timeouts" "Last Test" "Reallocated Sectors" "Temp"
       ;;
 
     text)
-      (
-       echo To: $EMAIL_TO
-       echo Subject: $MAIL_SUBJECT
-       echo Content-Type: text/html
-       echo MIME-Version: 1.0
-       echo Content-Disposition: inline
-      ) > ${O_FILE}
-      return $SUCCESS
+      fmt="| %-6.6s | %-7.7s | %-20.20s | %-20.20s | %-10.10s | %-8.8s | %-8.8s | %-10.10s | %-10.10s | %-10.10s | %-10.10s | %-10.10s | %-10.10s | %-10.10s | %-5.5s |\n"
+      printf "$fmt" " " " " " " " " " " "Max" "Current" "Hours" "Start/Stop" \
+                "End to End" "Spin" "Command" "Last Test" "Realloc" "Temp" >> ${O_FILE}
+      printf "$fmt" "Device" "Type" "Serial #" "Model" "Capacity" "Speed" "Speed" "Powered On" \
+             "Count" "Errors" "Retries" "Timeouts" "Results" "Sectors" "Temp" >> ${O_FILE}
+      draw_separator
       ;;
-   esac
+  esac
+  return $SUCCESS
 }
 
 function create_results_header () {
@@ -536,29 +653,17 @@ function create_results_header () {
       print_raw "</head>"
       print_raw "<body>"
       print_raw "<h1>Status for Disks Found on $HOST_NAME on $(date "+%Y-%m-%d")</h1>"
-      print_sys_info
-
-      print_raw "<table id="storage" border=2 cellpadding=4>"
-      print_row "Device" "Type" "Serial #" "Model" "Capacity" "Speed" "Current Speed" "Hours Powered On" "Start/Stop Count" \
-                "End to End Errors" "Spin Retries" "Command Timeouts" "Last Test" "Reallocated Sectors" "Temp"
       ;;
 
     text)
       printf "%s\n" "<html><body><pre style='font: monospace'>" >> ${O_FILE}
-      print_sys_info
-      fmt="| %-6.6s | %-7.7s | %-20.20s | %-20.20s | %-10.10s | %-8.8s | %-8.8s | %-10.10s | %-10.10s | %-10.10s | %-10.10s | %-10.10s | %-10.10s | %-10.10s | %-5.5s |\n"
-      printf "$fmt" " " " " " " " " " " "Max" "Current" "Hours" "Start/Stop" \
-                "End to End" "Spin" "Command" "Last Test" "Realloc" "Temp" >> ${O_FILE}
-      printf "$fmt" "Device" "Type" "Serial #" "Model" "Capacity" "Speed" "Speed" "Powered On" \
-             "Count" "Errors" "Retries" "Timeouts" "Results" "Sectors" "Temp" >> ${O_FILE}
-      draw_separator
       ;;
   esac
   return $SUCCESS
 }
 
 function end_document () {
-  case $O_FILE in
+  case $O_FORMAT in
     html)
       print_raw "</body></html>"
       ;;
@@ -571,40 +676,57 @@ function end_document () {
 #------------------------------
 ### Main script starts here ###
 #------------------------------
+####
+#
+# The basic flow is:
+#  1.  Look for which commands are available to be used to get various system, disk
+#      network and other information.
+#  2.  Collect the system information -- Note that this fills in the dictionary so
+#      we need to be mindful of the order in which we fill in the details as some 
+#      decisions are made based upon info int he dictionary.
+#  3.  Get information about the disks on the system
+#  4.  Create a document that can be mailed and mail it desired
+#
+####
 
-##### Check for min versions  #####
-if [[ $BASH_MIN_VER != $BASH_CUR_VER ]]; then
-  err "This script requires at least BASH $BASH_MIN_VER."
-  die 
+if [[ $BASH_MIN_VER -gt $BASH_CUR_VER ]]; then
+  err "This script requires at least BASH $BASH_MIN_VER.  Current version is $BASH_CUR_VER."
+  die
 fi
 
 get_cmd_args "$@"
-if  [[ "$?" == $FAILURE ]]; then
-  die 
-fi
 
+if  [[ "$?" == $FAILURE ]]; then
+  die
+fi
 
 if test -f "$O_FILE"; then
   log_info "${FUNCNAME[0]}" "INFO" "$O_FILE exists.  Deleting."
   rm $O_FILE
 fi
 
+# NB: Need to add a function to test if sudo is required  for any of the required commands.  If so
+#     print our a message and ask that it be run with sudo or root.
+
 check_avail_commands "${ALL_CMDS[@]}"
+validate_commands "${REQ_CMDS[@]}"
 get_sys_info
+
+# Create the document
 create_mail_header
 create_results_header
+print_sys_info
+create_table_header
+
+# Go and get the disk information
 get_disks
 get_disk_info
 end_table
 end_document
 
-#  Send the file if required.
-if [ $MAIL_FILE != "n" ]
-then
+if [ $MAIL_FILE != "n" ]; then
   log_info "${FUNCNAME[0]}" "INFO" "Sending the report to $EMAIL_TO"
   sendmail -t < $O_FILE
-else
-  log_info "${FUNCNAME[0]}" "INFO" "Not sending file"
 fi
 
 log_info "${FUNCNAME[0]}" "INFO" "Cleaning up."
