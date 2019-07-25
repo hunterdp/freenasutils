@@ -24,6 +24,9 @@
 #    - Need to add capability to read SD cards (raspberry pi)  Info is located at
 #      sys/block/mmcblk#.  Also can try the udevadm -a -c /dev/mmcblk# command
 #    - Need to add ability to get information about virtual disks
+#    - Clean up the get_disk functions and seperate them into getting infomration about a single disk
+#      and storing infomration about a single disk.  This makes it more portable and cleaner.
+#    - Try and eliminate all global values.
 
 ##### Constants #####
 declare -r AUTHOR="David Hunter"
@@ -56,7 +59,8 @@ declare -A CMDS_ARRAY
 
 # An associative array of system attributes and their values.  Note that we do prepopulate
 # the array with common values we should be able to collect.  NB: That additional K/V pairs
-# can be added onto (aka: multiple CPU stats)
+# can be added onto (aka: multiple CPU stats).  Use a consistent naming prefix such that 
+# the array can be sorted on major sections.
 declare -A SYS_INFO
 SYS_INFO=( [HOST_NAME]= \
            [HOST_UPTIME]= \
@@ -76,9 +80,8 @@ SYS_INFO=( [HOST_NAME]= \
            [FIRMWARE_REV]= \
           )
 
-#---------------
-# Misc functions
-#---------------
+##### Misc functions #####
+
 function log_info () {
   if [ $DEBUG == "y" ]; then
     printf "%(%m-%d-%Y %H:%M:%S)T %-20s %-25s %-5s %s\n" $(date +%s) "$0" "$1" "$2" "$3"
@@ -218,9 +221,8 @@ function is_command_available () {
   done
 #  return $FAILURE
 }
-#-------------------------------------------
-#  Functions dealing with all types of disks
-#-------------------------------------------
+
+#####  Functions dealing with disks #####
 
 function get_disks () {
   # Gets the disk on the system.  It tries to get the most accurate and comprehensive
@@ -255,6 +257,11 @@ function get_disks () {
 
 function get_disk_info () {
   # Cycle thrrough the disks and collect data dependent upon what type
+  # ToDo: Transform into multiple functions:
+  #         - get_list_of_disks -- Gather a list of disks on the system and store in an assoc array
+  #         - get_disk_type -- Given a disk, gets its type and store in the array above
+  #         - get_disk_info -- Given a disk and its type, retrieve infomration and store in assoc array
+  #         - print_disk_info -- Given a disk assoc array and links to detail assoc arrays, print out the info
   log_info "${FUNCNAME[0]}" "INFO" "Iterrating through disks."
 
   for i in $LIST_OF_DISKS
@@ -323,7 +330,6 @@ function get_disk_info () {
           ;;
 
         USB)
-: '
           full_results=$(smartctl -a -d scsi /dev/$i)
           model=$(grep 'Product' <<< $full_results | awk '/Product/ {print $2, $3, $4}')
           capacity=$(grep 'User Capacity' <<< $full_results | awk '/User Capacity/ {print $5, $6}' | sed -e 's/^.//' -e 's/.$//')
@@ -332,7 +338,6 @@ function get_disk_info () {
           test_results="-"
           bad_sectors="-"
           temp="-"
-'
           ;;
 
         OFFLINE)
@@ -363,9 +368,7 @@ function get_disk_info () {
   return $SUCCESS
 }
 
-#--------------------------
-#  System related functions
-#--------------------------
+#####  System related functions #####
 
 function get_cpu_info () {
 
@@ -403,13 +406,13 @@ function get_hw_info () {
 }
 
 get_bios_info () {
-  # Retrieve information about the bios
+  # Retrieve information about the bios.  the dmidecode command is requried.
 
   return $SUCCESS
 }
 
 function get_temps () {
-  # Tries to get temperatures of various elements (board, cpu, etc.).  
+  # Get temperatures of various elements (board, cpu, etc.) and add to SYS_INFO array  
   local i
   local -i num_cpu_temps=0
   local cpu_temps
@@ -420,7 +423,7 @@ function get_temps () {
       cpu_temps=($(sysctl -a | grep temperature | awk '{print $2}'))
 
       # When called it will return an array of temps depending upon the ncpus
-      # Store all the temps in [CPU_TEMP] and then add individual temps to dictionary
+      # Store all the temps in SYS_INFO[CPU_TEMP] and then add individual temps to dictionary
       if [[ ${#cpu_temps[@]} -gt 0 ]]; then
         SYS_INFO[CPU_TEMP]="${cpu_temps[@]}"
         for i in "${cpu_temps[@]}"; do
@@ -444,6 +447,7 @@ function get_temps () {
 }
 
 function get_host_info () {
+  # Retrieves infomration about the system and stores it into the SYS_INFO dictionary
   local ip_addrs
   local -i num_ip_addrs=0
 
@@ -474,7 +478,6 @@ function get_os_info () {
   SYS_INFO[OS_TYPE]=$(uname -s)
   SYS_INFO[OS_VER]=$(uname -o)
   SYS_INFO[OS_REL]=$(uname -r)
-
   return $SUCCESS
 }
 
@@ -534,9 +537,8 @@ function print_sys_info () {
   return $SUCCESS
 }
 
-#----------------------------------------
-# Some simple text based Output Functions
-#----------------------------------------
+##### Some simple text based Output Functions #####
+
 function draw_separator () {
   local output_char="="
   local -i num_chars=200
@@ -553,9 +555,8 @@ function draw_row () {
   return $SUCCESS
 }
 
-#----------------------------------
-# Some simple HTML Output Functions
-#----------------------------------
+##### Some simple HTML Output Functions #####
+
 function start_table () {
   echo "<table id="storage" border=2 cellpadding=4>" >> ${O_FILE}
 }
@@ -600,12 +601,13 @@ function print_row() {
   return $SUCCESS
 }
 
-#-------------------------
-### Document functions ###
-#-------------------------
+##### Document functions #####
 
 function create_mail_header () {
-#  Create the email header
+#  Create the email header.  Pass in the email addresses, subject and the output file.
+  local to_addr=$1
+  local subject=$2
+  local output_file=$3
   (
    echo To: $EMAIL_TO
    echo Subject: $MAIL_SUBJECT
@@ -673,9 +675,7 @@ function end_document () {
   esac
 }
 
-#------------------------------
-### Main script starts here ###
-#------------------------------
+##### Main script starts here #####
 ####
 #
 # The basic flow is:
@@ -713,7 +713,7 @@ validate_commands "${REQ_CMDS[@]}"
 get_sys_info
 
 # Create the document
-create_mail_header
+create_mail_header $EMAIL_TO $MAIL_SUBJECT $O_FILE
 create_results_header
 print_sys_info
 create_table_header
@@ -733,8 +733,7 @@ log_info "${FUNCNAME[0]}" "INFO" "Cleaning up."
 log_info "${FUNCNAME[0]}" "INFO" "Ending the disk checking script"
 exit $SUCCESS
 
-
-
+    # The following are the meaning of the smartcrl data items.
     #  Reallocated Sectors Count            Count of reallocated sectors. The raw value represents a
     #                                       count of the bad sectors that have been found and remapped.
     #                                       Thus, the higher the attribute value, the more sectors the
