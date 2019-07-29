@@ -36,26 +36,29 @@ declare -r TRUE="YES"
 declare -r FALSE="NO"
 declare -r -i FAILURE=1
 declare -r -i SUCCESS=0
-declare -r REQ_CMDS="awk uname hostname smartctl uptime hostname hash wc"
-declare -r OPT_CMDS="geom lsblk dmidecode lshw blkid sysctl pr column"
-declare -r ALL_CMDS="$REQ_CMDS $OPT_CMDS"
-declare -r -i BASH_MIN_VER=4
-declare -r -i BASH_CUR_VER=$(bash --version | grep 'GNU bash' | awk '{print substr($4,1,1)}')
+declare -r -a REQ_CMDS="awk uname hostname smartctl uptime hostname hash wc"
+declare -r -a OPT_CMDS="geom lsblk dmidecode lshw blkid sysctl pr column"
+declare -r -a ALL_CMDS="$REQ_CMDS $OPT_CMDS"
+declare -r -i BASH_REQ_MAJ_VER=4
+declare -r -i BASH_REQ_MIN_VER=0
+declare -r -i BASH_MAJ_VER=${BASH_VERSINFO[0]}
+declare -r -i BASH_MIN_VER=${BACH_VERSINFO[1]}
 
 ##### Global Variables #####
-declare -g DEBUG="n"
-declare -g MAIL_FILE="y"
-declare -g O_FORMAT="html"
-declare -g O_FILE="/tmp/disk_overview.html"
+declare -g -l DEBUG="n"
+declare -g -l MAIL_FILE="y"
+declare -g -l O_FORMAT="html"
+declare -g -l O_FILE="/tmp/disk_overview.html"
 declare -g EMAIL_TO="user@company.com"
-declare -g HOST_NAME=$(hostname -f | tr '[:lower:]' '[:upper:]')
+declare -g -l HOST_NAME=$(hostname -f)
 declare -g MAIL_SUBJECT="FreeNAS SMART and Disk Summary for $HOST_NAME on $(date)"
-declare -g DISKS=""
-declare -g LIST_OF_DISKS=""
 
 # An assoicative array (sometimes called a dictionary) that holds system commands and if
 # they are available on the system.  This will get filled in the commands are tested.
 declare -A CMDS_ARRAY
+
+# An associative array of disks.  Key is name of device and value is device type
+declare -g -A LIST_OF_DISKS
 
 # An associative array of system attributes and their values.  Note that we do prepopulate
 # the array with common values we should be able to collect.  NB: That additional K/V pairs
@@ -80,11 +83,24 @@ SYS_INFO=( [HOST_NAME]= \
            [FIRMWARE_REV]= \
           )
 
+# An associative array of disks found and their type.  AN example would be DISKS_FOUND[dao]=HDD
+declare -A DISKS_FOUND
+
 ##### Misc functions #####
 
 function log_info () {
+  # prints out logginf information.
+  # NB: Think about shifting this to use the syslog
+  local file_name=$0
+  local src_line=${BASH_LINENO}
+  local -u severity=$1
+  local mesg=$2
+  declare call_stack
+
+  call_stack=$(dump_stack 2)
   if [ $DEBUG == "y" ]; then
-    printf "%(%m-%d-%Y %H:%M:%S)T %-20s %-25s %-5s %s\n" $(date +%s) "$0" "$1" "$2" "$3"
+    printf "%(%m-%d-%Y %H:%M:%S)T %-20s %-50s %-5s %s\n" $(date +%s) "$file_name" \
+                                                         "$call_stack" "$severity" "$mesg"
   fi;
   return $SUCCESS
 }
@@ -93,8 +109,30 @@ function err() {
   echo "[$(date +'%Y-%m-%dT%H:%M:%S%z')]: $@" >&2
 }
 
+function dump_stack () {
+# A simple call stack dumper.  The passed in parameter indicates which
+# level of the stack to start at.  Normally you would start at level 1,
+# which will not include the "dump_stack" function itself.  For calling from
+# a debugging function, start at level 2 to not include the logging function.
+
+  local i
+  local start_level=$1
+  local -a stack ret_stack
+  local level=0
+
+  for (( i=start_level; i<${#FUNCNAME[*]}; i++ )); do
+    printf -v stack[$i] "%s" "${FUNCNAME[$i]}(${BASH_LINENO[$i-1]})."
+    ((level++))
+    done
+  # remove the traling "."
+  printf -v ret_stack "%s" "${stack[@]}"
+  printf ${ret_stack%.*}
+}
+
 function die() {
+  # Prints out the call stack and then exits.
   local frame=0
+  log_info "ERROR" "Dumping call stack.."
   while caller $frame; do
     ((frame++));
   done
@@ -103,7 +141,7 @@ function die() {
 
 function usage () {
   echo "Usage: $(basename $0): [-d] [-e email address] [-f filename] [-m y | n] [-s subject] [-o html | text]"
-  exit $SUCCESS
+  exit $FAILURE
 }
 
 function get_cmd_args () {
@@ -140,7 +178,7 @@ function get_cmd_args () {
   done
   shift "$((OPTIND -1))"
 
-  log_info "${FUNCNAME[0]}" "INFO" "Command line arugments passed were: $passed_args."
+  log_info "INFO" "Command line arugments passed were: $passed_args."
 }
 
 function check_file_exist()
@@ -173,28 +211,27 @@ function validate_commands () {
 function check_avail_commands () {
   # Looks to see if the commands in the array passed are available on the system
   # and stores the results in the GLOBAL associative CMDS_ARRAY array
+
   local cmds_missing=0
-  local i=''
+  local cmd k
   declare -A commands_to_check=$1
 
-  for i in $commands_to_check; do
-    CMDS_ARRAY["$i"]=$TRUE
-    if ! hash "$i" > /dev/null 2>&1; then
-      CMDS_ARRAY["$i"]=$FALSE
+  for cmd in $commands_to_check; do
+    CMDS_ARRAY["$cmd"]=$TRUE
+    if ! hash "$cmd" > /dev/null 2>&1; then
+      CMDS_ARRAY["$cmd"]=$FALSE
       ((cmds_missing++))
     fi
   done
 
-  log_info "${FUNCNAME[0]}" "INFO" "Checking ${#CMDS_ARRAY[*]} commands."
+  log_info "INFO" "Checking ${#CMDS_ARRAY[*]} commands."
   if ((cmds_missing > 0)); then
-    log_info "${FUNCNAME[0]}" "INFO" "$cmds_missing commands are missing or not in PATH."
-  else
-    log_info "${FUNCNAME[0]}" "INFO" "All commands are found on the system."
+    log_info "INFO" "$cmds_missing commands are missing or not in PATH."
   fi
 
   if [ $DEBUG == "y" ]; then
-    for i in ${!CMDS_ARRAY[*]}; do
-       log_info "${FUNCNAME[0]}" "INFO" " $i : ${CMDS_ARRAY[$i]}"
+    for k in ${!CMDS_ARRAY[*]}; do
+       log_info "INFO" " $k : ${CMDS_ARRAY[$k]}"
     done
   fi
   return $SUCCESS
@@ -204,17 +241,17 @@ function is_command_available () {
   # Checks the passed command and sees if it is listed as available
   # Returns SUCCESS if available or FAILURE if not found or not available
 
-  local command_element=""
+  local i
   local command_to_check_for=$1
 
-  log_info "${FUNCNAME[0]}" "INFO" "Checking on status of $1 command."
-  for command_element in ${!CMDS_ARRAY[*]}; do
-    if [[ $command_to_check_for == $command_element ]]; then
-      if [[ $TRUE == ${CMDS_ARRAY[$command_element]} ]]; then
-        log_info "${FUNCNAME[0]}" "INFO" "$command_to_check_for is available ==> ${CMDS_ARRAY[$command_element]}."
+  log_info "INFO" "Checking on status of $1 command."
+  for i in ${!CMDS_ARRAY[*]}; do
+    if [[ $command_to_check_for == $i ]]; then
+      if [[ $TRUE == ${CMDS_ARRAY[$i]} ]]; then
+        log_info "INFO" "$command_to_check_for is available ==> ${CMDS_ARRAY[$i]}."
         return $SUCCESS
       else
-        log_info "${FUNCNAME[0]}" "INFO" "$command_to_check_for is not available ==> ${CMDS_ARRAY[$command_element]}."
+        log_info "INFO" "$command_to_check_for is not available ==> ${CMDS_ARRAY[$i]}."
         return $FAILURE
        fi
     fi
@@ -222,91 +259,151 @@ function is_command_available () {
 #  return $FAILURE
 }
 
-#####  Functions dealing with disks #####
+#####  Storage Related  #####
 
 function get_disks () {
   # Gets the disk on the system.  It tries to get the most accurate and comprehensive
-  # list of disks depending upon the commands available on the machine.
-  log_info "${FUNCNAME[0]}" "INFO" "Generating a list of all disks on the system."
+  # list of disks depending upon the commands available on the machine.  It stores the
+  # disks found in a sorted global array, LIST_OF_DISKS.
+  local disks
 
-  # Figure out which command will work and get disks
   is_command_available geom
   if [[ $? -eq $SUCCESS ]]; then
-    log_info "${FUNCNAME[0]}" "INFO" "Using geom command to obtain disks on the system."
-    DISKS=$(geom disk list | grep Name | awk '{print $3}')
+    log_info "INFO" "Using geom command to obtain disks on the system."
+    disks=$(geom disk list | grep Name | awk '{print $3}')
+
   else
     is_command_available lsblk;
     if [[ $? -eq $SUCCESS ]]; then
-      log_info "${FUNCNAME[0]}" "INFO" "Using the lsblk command to obtain disks on the system."
-      DISKS=$(lsblk -dp | grep -o '^/dev[^ ]*'  | sed 's/\/dev\///')
+      log_info "INFO" "Using the lsblk command to obtain disks on the system."
+      disks=$(lsblk -dp | grep -o '^/dev[^ ]*'  | sed 's/\/dev\///')
     else
-     log_info "${FUNCNAME[0]}" "ERROR" "No disks found.  Aborting."
+     log_info "ERROR" "No disks found.  Aborting."
      err "No disk found.  Aborting."
      exit $FAILURE
     fi
   fi
 
-  LIST_OF_DISKS=$(sort <<<"${DISKS[*]}")
+  LIST_OF_DISKS=$(sort <<<"${disks[*]}")
+
+  if [ $DEBUG == "y" ]; then
+    for x in ${!LIST_OF_DISKS[@]}; do
+       log_info "ERR" " $x : ${LIST_OF_DISKS_array[$x]}"
+    done
+  fi
+
+
   if [[ -z $LIST_OF_DISKS ]]; then
-    log_info "${FUNCNAME[0]}" "ERROR" "No disks found.  Aborting."
+    log_info "ERROR" "No disks found.  Aborting."
      err "No disk found.  Aborting."
     exit $FAILURE
   fi
   return $SUCCESS
+
 }
 
+function get_disk_type () {
+  # Given an array of disks, try and decipher what type
+  # of disk it is.  Store the results into the passed
+  # global associative array.
+
+  local disk
+  local dev_type=""
+  local disk_array=("$@")
+  declare -A ret_disk_array=$2
+
+  for disk in "${disk_array[@]}"; do
+    local results=$(smartctl -a /dev/$disk)
+    local ssd=$(grep 'Solid State Device' <<< $results)
+    local usb=$(grep 'USB bridge' <<< $results)
+    local offline=$(grep 'INQUIRY failed' <<< $results)
+    local vmware=$(grep 'VMware' <<< $results)
+    local hdd=$(grep 'rpm' <<< $results)
+
+    if [[ -n "${ssd/[ ]*\n}" ]]; then
+      dev_type="SSD"
+    elif [[ -n "${usb/[ ]*\n/}" ]]; then
+      dev_type="USB"
+    elif [[ -n "${offline/[ ]*\n}" ]]; then
+      dev_type="O/L"
+    elif [[ -n "${vmware/[ ]*\n}" ]]; then
+      dev_type="VMW"
+    elif [[ -n "${hdd/[ ]*\n}" ]]; then
+      dev_type="HDD"
+    else
+      dev_type="UKN"
+    fi
+    ret_disk_array["$disk"]=$dev_type
+  done
+
+  log_info "INFO" "Number of disk in array is ${#ret_disk_array[@]}"
+  if [ $DEBUG == "y" ]; then
+    for x in ${!ret_disk_array[@]}; do
+       log_info "WARN" " $x : ${ret_disk_array[$x]}"
+    done
+  fi
+
+  return $SUCCESS
+}
 function get_disk_info () {
   # Cycle thrrough the disks and collect data dependent upon what type
   # ToDo: Transform into multiple functions:
-  #         - get_list_of_disks -- Gather a list of disks on the system and store in an assoc array
-  #         - get_disk_type -- Given a disk, gets its type and store in the array above
   #         - get_disk_info -- Given a disk and its type, retrieve infomration and store in assoc array
   #         - print_disk_info -- Given a disk assoc array and links to detail assoc arrays, print out the info
-  log_info "${FUNCNAME[0]}" "INFO" "Iterrating through disks."
+  log_info "INFO" "Iterrating through disks."
+  declare -A TEST_DISKS
 
-  for i in $LIST_OF_DISKS
-    do
-      # Reset all the variables to blank to prevent looping for blank results.
-      local max_speed="    Gb/s"
-      local cur_speed="    Gb/s"
-      local ser_num="-"
-      local model="-"
-      local dev_type="UKN"
-      local capacity="     xB"
-      local pwr_local on_hrs="-"
-      local start_stop_ct="-"
-      local total_seeks="-"
-      local spin_errors="-"
-      local cmd_errors="-"
-      local test_results="-"
-      local bad_sectors="-"
-      local temp="-"
+  get_disk_type $LIST_OF_DISKS
 
-      full_results=$(smartctl -a /dev/$i)
-      ssd_dev=$(grep 'Solid State Device' <<< $full_results)
-      usb_dev=$(grep 'USB bridge' <<< $full_results)
-      offline_dev=$(grep 'INQUIRY failed' <<< $full_results)
-      vmware_dev=$(grep 'VMware' <<< $full_results)
-      hdd_dev=$(grep 'rpm' <<< $full_results)
+  if [ $DEBUG == "y" ]; then
+    for n in ${!TEST_DISKS[@]}; do
+       log_info "ERROR" " $n : ${ret_disk_array[$n]}"
+    done
+  fi
 
-      if [[ -n "${ssd_dev/[ ]*\n}" ]]; then
-        dev_type="SSD"
-      elif [[ -n "${usb_dev/[ ]*\n/}" ]]; then
-        dev_type="USB"
-      elif [[ -n "${offline_dev/[ ]*\n}" ]]; then
-        dev_type="O/L"
-      elif [[ -n "${vmware_dev/[ ]*\n}" ]]; then
-        dev_type="VMW"
-      elif [[ -n "${hdd_dev/[ ]*\n}" ]]; then
-        dev_type="HDD"
-      else
-        dev_type="UKN"
-      fi
-      log_info "${FUNCNAME[0]}" "INFO" "Examing device $i which is $dev_type device."
 
-      #  For each of the device types, collect those common SMART values that could indicate an issue
-      #  You can find more details at https://en.wikipedia.org/wiki/S.M.A.R.T.
-      case $dev_type in
+  for i in $LIST_OF_DISKS; do
+    # Reset all the variables to blank to prevent looping for blank results.
+    local max_speed="    Gb/s"
+    local cur_speed="    Gb/s"
+    local ser_num="-"
+    local model="-"
+    local dev_type="UKN"
+    local capacity="     xB"
+    local pwr_local on_hrs="-"
+    local start_stop_ct="-"
+    local total_seeks="-"
+    local spin_errors="-"
+    local cmd_errors="-"
+    local test_results="-"
+    local bad_sectors="-"
+    local temp="-"
+
+    full_results=$(smartctl -a /dev/$i)
+    ssd_dev=$(grep 'Solid State Device' <<< $full_results)
+    usb_dev=$(grep 'USB bridge' <<< $full_results)
+    offline_dev=$(grep 'INQUIRY failed' <<< $full_results)
+    vmware_dev=$(grep 'VMware' <<< $full_results)
+    hdd_dev=$(grep 'rpm' <<< $full_results)
+
+    if [[ -n "${ssd_dev/[ ]*\n}" ]]; then
+      dev_type="SSD"
+    elif [[ -n "${usb_dev/[ ]*\n/}" ]]; then
+      dev_type="USB"
+    elif [[ -n "${offline_dev/[ ]*\n}" ]]; then
+      dev_type="O/L"
+    elif [[ -n "${vmware_dev/[ ]*\n}" ]]; then
+      dev_type="VMW"
+    elif [[ -n "${hdd_dev/[ ]*\n}" ]]; then
+      dev_type="HDD"
+    else
+      dev_type="UKN"
+    fi
+    log_info "INFO" "Examing device $i which is $dev_type device."
+
+    #  For each of the device types, collect those common SMART values that could indicate an issue
+    #  You can find more details at https://en.wikipedia.org/wiki/S.M.A.R.T.
+    case $dev_type in
         HDD | SSD)
           ser_num=$(grep        'Serial Number'         <<< $full_results | awk '/Serial Number/         {print $3}')
           model=$(grep          'Device Model'          <<< $full_results | awk '/Device Model/          {print $3 $4}')
@@ -341,11 +438,11 @@ function get_disk_info () {
           ;;
 
         OFFLINE)
-          log_info "${FUNCNAME[0]}" "INFO" "Disk is offline."
+          log_info "INFO" "Disk is offline."
           ;;
 
         UKN)
-          log_info "${FUNCNAME[0]}" "INFO" "Unknown disk type"
+          log_info "INFO" "Unknown disk type"
           ;;
       esac
 
@@ -376,11 +473,11 @@ function get_cpu_info () {
   SYS_INFO[CPU_PROC_TYPE]=$(uname -p)
 
   if [[ -z ${SYS_INFO[OS_TYPE]} ]]; then
-    log_info "${FUNCNAME[0]}" "INFO" "OS_TYPE not defined.  Calling get_os_info"
+    log_info "INFO" "OS_TYPE not defined.  Calling get_os_info"
     get_os_info
   fi
 
-  log_info "${FUNCNAME[0]}" "INFO" "Checking for cpu count under ${SYS_INFO[OS_TYPE]}"
+  log_info "INFO" "Checking for cpu count under ${SYS_INFO[OS_TYPE]}"
   case ${SYS_INFO[OS_TYPE]} in
     FreeBSD)
       SYS_INFO[CPU_NUMBER]=$(sysctl -n hw.ncpu)
@@ -395,7 +492,7 @@ function get_cpu_info () {
       ;;
   esac
 
-  log_info "${FUNCNAME[0]}" "INFO" "Number of cpus found is: ${SYS_INFO[CPU_NUMBER]}"
+  log_info "INFO" "Number of cpus found is: ${SYS_INFO[CPU_NUMBER]}"
   return $SUCCESS
 }
 
@@ -428,12 +525,12 @@ function get_temps () {
         SYS_INFO[CPU_TEMP]="${cpu_temps[@]}"
         for i in "${cpu_temps[@]}"; do
           SYS_INFO[CPU_TEMP_$num_cpu_temps]=${cpu_temps[num_cpu_temps]}
-          log_info "${FUNCNAME[0]}" "INFO" "CPU number [$num_ip_addrs] temperature is: ${SYS_INFO[CPU_TEMP_$num_cpu_temps]}."
+          log_info "INFO" "CPU number [$num_ip_addrs] temperature is: ${SYS_INFO[CPU_TEMP_$num_cpu_temps]}."
           ((num_cpu_temps++))
         done
       else
         SYS_INFO[CPU_TEMP]="0.0"
-        log_info "${FUNCNAME[0]}" "INFO" "CPU temperature not found."
+        log_info "INFO" "CPU temperature not found."
       fi
       ;;
 
@@ -452,9 +549,11 @@ function get_host_info () {
   local -i num_ip_addrs=0
 
   SYS_INFO[HOST_NAME]=$(hostname -f | tr '[:lower:]' '[:upper:]')
-  SYS_INFO[HOST_UPTIME]=$(uptime | awk '{ print $3, $4, $5 }' | sed 's/,//g' | sed 's/\r//g')
+# NB: Should fix to extract just hours and days up vs the entire string. 
+#  SYS_INFO[HOST_UPTIME]=$(uptime | awk '{ print $3, $4, $5 }' | sed 's/,//g' | sed 's/\r//g')
+  SYS_INFO[HOST_UPTIME]=$(uptime)
   ip_addrs=($(ifconfig | grep -Eo 'inet (addr:)?([0-9]*\.){3}[0-9]*' | grep -Eo '([0-9]*\.){3}[0-9]*' | grep -v '127.0.0.1'))
-  log_info "${FUNCNAME[0]}" "INFO" "Number of host ip addresses found is: ${#ip_addrs[@]}."
+  log_info "INFO" "Number of host ip addresses found is: ${#ip_addrs[@]}."
   SYS_INFO[HOST_IP_NUMBER]=${#ip_addrs[@]}
 
   # A system may have more than 1 ip address or interface.  Count the number and create an array with the ips.
@@ -463,12 +562,12 @@ function get_host_info () {
     SYS_INFO[HOST_IP]=${ip_addrs[@]}
     for i in "${ip_addrs[@]}"; do
       SYS_INFO[HOST_IP_$num_ip_addrs]=${ip_addrs[num_ip_addrs]}
-      log_info "${FUNCNAME[0]}" "INFO" "IP address number [$num_ip_addrs] found is: ${SYS_INFO[HOST_IP_$num_ip_addrs]}."
+      log_info "INFO" "IP address number [$num_ip_addrs] found is: ${SYS_INFO[HOST_IP_$num_ip_addrs]}."
       ((num_ip_addrs++))
     done
   else
     SYS_INFO[HOST_IP]="0.0.0.0"
-    log_info "${FUNCNAME[0]}" "INFO" "IP address not found, setting to ${SYS_INFO[HOST_IP]}."
+    log_info "INFO" "IP address not found, setting to ${SYS_INFO[HOST_IP]}."
   fi
   return $SUCCESS
 }
@@ -498,10 +597,10 @@ function get_sys_info () {
   # to make reading a bit easier.
   if [ $DEBUG == "y" ]; then
     local keys=`echo ${!SYS_INFO[@]} | tr ' ' '\012' | sort | tr '\012' ' '`
-    log_info "${FUNCNAME[0]}" "INFO" "Dumping the SYS_INFO Dictionary..."
+    log_info "INFO" "Dumping the SYS_INFO Dictionary..."
     for key in $keys; do
       local val=${SYS_INFO[$key]}
-      log_info "${FUNCNAME[0]}" "INFO" " $key :  $val"
+      log_info "INFO" " $key :  $val"
     done
   fi
   return $SUCCESS
@@ -689,8 +788,8 @@ function end_document () {
 #
 ####
 
-if [[ $BASH_MIN_VER -gt $BASH_CUR_VER ]]; then
-  err "This script requires at least BASH $BASH_MIN_VER.  Current version is $BASH_CUR_VER."
+if [[ $BASH_REQ_VER -gt $BASH_MAJ_VER ]]; then
+  err "This script requires at least BASH major version $BASH_MIN_VER.  Current version is ${BASH_VERSINFO[@]}."
   die
 fi
 
@@ -701,7 +800,7 @@ if  [[ "$?" == $FAILURE ]]; then
 fi
 
 if test -f "$O_FILE"; then
-  log_info "${FUNCNAME[0]}" "INFO" "$O_FILE exists.  Deleting."
+  log_info "INFO" "$O_FILE exists.  Deleting."
   rm $O_FILE
 fi
 
@@ -725,12 +824,12 @@ end_table
 end_document
 
 if [ $MAIL_FILE != "n" ]; then
-  log_info "${FUNCNAME[0]}" "INFO" "Sending the report to $EMAIL_TO"
+  log_info "INFO" "Sending the report to $EMAIL_TO"
   sendmail -t < $O_FILE
 fi
 
-log_info "${FUNCNAME[0]}" "INFO" "Cleaning up."
-log_info "${FUNCNAME[0]}" "INFO" "Ending the disk checking script"
+log_info "INFO" "Cleaning up."
+log_info "INFO" "Ending the disk checking script"
 exit $SUCCESS
 
     # The following are the meaning of the smartcrl data items.
