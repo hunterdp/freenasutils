@@ -22,6 +22,7 @@
 #    - Clean up the HTML output as it is mixed.
 #    - Change up all functions so globals are passed in versus assumed.
 ##
+set -o nounset    # Exposes unset variables
 
 ##### Constants #####
 declare -r    AUTHOR="David Hunter"
@@ -34,13 +35,13 @@ declare -r -i SUCCESS=0
 declare -r -i BASH_REQ_MAJ_VER=4
 declare -r -i BASH_REQ_MIN_VER=0
 declare -r -i BASH_MAJ_VER=${BASH_VERSINFO[0]}
-declare -r -i BASH_MIN_VER=${BACH_VERSINFO[1]}
+declare -r  -i BASH_MIN_VER=${BASH_VERSINFO[1]}
 
 # Required commands and optional commands.  The script will not function
 # without required commands.  The script MAY function without an optional command.
-declare -r -a REQ_CMDS="awk uname hostname smartctl uptime hostname hash wc"
-declare -r -a OPT_CMDS="sysctl geom lsblk dmidecode lshw blkid pr column"
-declare -r -a ALL_CMDS="$REQ_CMDS $OPT_CMDS"
+declare  -a REQ_CMDS="awk uname hostname smartctl uptime hostname hash wc"
+declare  -a OPT_CMDS="sysctl geom lsblk dmidecode lshw blkid pr column"
+declare  -a ALL_CMDS="$REQ_CMDS $OPT_CMDS"
 
 ##### Global Variables #####
 declare -g -l DEBUG="n"
@@ -120,7 +121,6 @@ function dump_stack () {
   local -a stack ret_stack
   for (( i=start_level; i<${#FUNCNAME[*]}; i++ )); do
     printf -v stack[$i] "%s" "${FUNCNAME[$i]}(${BASH_LINENO[$i-1]})."
-    ((level++))
   done
 
   # remove the traling "."
@@ -218,7 +218,7 @@ function validate_commands () {
   local command
   for command in $1; do
     if ! hash "$command" > /dev/null 2>&1; then
-      err "Required command $command not availabe.  Please install.\n  Exiting the program."
+      log_error "Required command $command not availabe.  Exiting the program."
       exit $FAILURE
     fi
   done
@@ -544,8 +544,8 @@ function get_cpu_info () {
       ;;
 
     Linux)
-      SYSINFO[CPU_NUMBER]=$(grep -c '^processor' /proc/cpuinfo)
-      SYSINFO[CPU_MODEL]=$(grep 'model name' /proc/cpuinfo)
+      SYS_INFO[CPU_NUMBER]=$(grep -c '^processor' /proc/cpuinfo)
+      SYS_INFO[CPU_MODEL]=$(grep 'model name' /proc/cpuinfo)
       SYS_INFO[HOST_PHYS_MEM]=$(grep MemTotal /proc/meminfo)
       ;;
   esac
@@ -805,7 +805,7 @@ function create_results_header () {
 
     text)
       printf "%s\n" "<html><body><pre style='font: monospace'>" >> ${O_FILE}
-      printf "$s\n" "Status for disks found on $HOST_NAME on $(date '+$Y-%m-$d')" >> ${O_FILE}
+      printf "%s\n" "Status for disks found on $HOST_NAME on $(date '+$Y-%m-$d')" >> ${O_FILE}
       ;;
   esac
   return $SUCCESS
@@ -836,7 +836,7 @@ function end_document () {
 #
 ####
 
-if [[ $BASH_REQ_VER -gt $BASH_MAJ_VER ]]; then
+if [[ $BASH_REQ_MAJ_VER -gt $BASH_MAJ_VER ]]; then
   err "This script requires at least BASH major version $BASH_MIN_VER.  Current version is ${BASH_VERSINFO[@]}."
   die
 fi
@@ -850,6 +850,7 @@ if test -f "$O_FILE"; then log_info  "$O_FILE exists.  Deleting."; rm $O_FILE; f
 #     print our a message and ask that it be run with sudo or root.
 
 check_avail_commands "${ALL_CMDS[@]}"
+#check_avail_commands ALL_CMDS
 validate_commands "${REQ_CMDS[@]}"
 get_sys_info
 
