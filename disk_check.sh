@@ -35,7 +35,7 @@ declare -r -i SUCCESS=0
 declare -r -i BASH_REQ_MAJ_VER=4
 declare -r -i BASH_REQ_MIN_VER=0
 declare -r -i BASH_MAJ_VER=${BASH_VERSINFO[0]}
-declare -r  -i BASH_MIN_VER=${BASH_VERSINFO[1]}
+declare -r -i BASH_MIN_VER=${BASH_VERSINFO[1]}
 
 # Required commands and optional commands.  The script will not function
 # without required commands.  The script MAY function without an optional command.
@@ -55,7 +55,7 @@ declare -g    MAIL_SUBJECT="FreeNAS SMART and Disk Summary for $HOST_NAME on $(d
 # An assoicative array (sometimes called a dictionary) that holds system commands and if
 # they are available on the system.  This will get filled in the commands are tested. The
 # value for each key is either the global TRUE or FALSE.
-declare -A LIST_OF_COMMANDS
+declare -g -A LIST_OF_COMMANDS
 
 # An associative array of disks.  Key is name of device and value is device type.  For
 # example LIST_OF_DISKS[da0]=HDD
@@ -380,14 +380,13 @@ function print_disk_info () {
                   "$pwr_on_hrs" "$start_stop_ct" "$total_seeks" \
                   "$spin_errors" "$cmd_errors" "$bad_sectors" "$temp"
         ;;
-
         text)
-          pretty_val=$(echo "$vals[$key]" | tr '\n' ' ')
-          printf "$fmt" "${vals[$key]}" >> ${output_file}
+          pretty_val=$(echo "${vals[$key]}" | tr '\n' ' ')
+          printf "$fmt" "${vals[$key]}" >> $output_file
         ;;
       esac
   done
-  printf "|\n" >> ${output_file}
+  printf "|\n" >> $output_file
   return $SUCCESS
 }
 
@@ -439,13 +438,13 @@ function get_disk_info () {
         VMW)
           ;;
 
-#        USB)
-#          full_results=$(smartctl -a -d scsi /dev/$key)
-#          disk_info[c_model]=$(grep 'Product' <<< $full_results | awk '/Product/ {print $2, $3, $4}')
-#          disk_info[e_capacity]=$(grep 'User Capacity' <<< $full_results | awk '/User Capacity/ {print $5, $6}' | sed -e 's/^.//' -e 's/.$//')
-#          disk_info[d_ser_num]=$(grep 'Vendor:' <<< $full_results | awk '/Vendor:/ {print $3}')
-#          disk_info[j_start_stop_ct]=$(grep 'Power_Cycle_Count' <<< $full_results | awk '/Power_Cycle_Count/ {print $10}')
-#          ;;
+        USB)
+          full_results=$(smartctl -a -d scsi /dev/$key)
+          disk_info[c_model]=$(grep 'Product' <<< $full_results | awk '/Product/ {print $2, $3, $4}')
+          disk_info[e_capacity]=$(grep 'User Capacity' <<< $full_results | awk '/User Capacity/ {print $5, $6}' | sed -e 's/^.//' -e 's/.$//')
+          disk_info[d_ser_num]=$(grep 'Vendor:' <<< $full_results | awk '/Vendor:/ {print $3}')
+          disk_info[j_start_stop_ct]=$(grep 'Power_Cycle_Count' <<< $full_results | awk '/Power_Cycle_Count/ {print $10}')
+          ;;
 
         OFFLINE)
           log_info  "Disk is offline."
@@ -581,7 +580,7 @@ function get_temps () {
         SYS_INFO[CPU_TEMP]="${cpu_temps[@]}"
         for i in "${cpu_temps[@]}"; do
           SYS_INFO[CPU_TEMP_$num_cpu_temps]=${cpu_temps[num_cpu_temps]}
-          log_info  "CPU number [$num_ip_addrs] temperature is: ${SYS_INFO[CPU_TEMP_$num_cpu_temps]}."
+          log_info  "CPU number [$num_cpu_temps] temperature is: ${SYS_INFO[CPU_TEMP_$num_cpu_temps]}."
           ((num_cpu_temps++))
         done
       else
