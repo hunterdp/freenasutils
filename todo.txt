@@ -1,0 +1,28 @@
+13:#    TODO(dph) - Need to add capability to read SD cards (raspberry pi)  Info is located at
+15:#    TODO(dph) - Need to add ability to get information about virtual disks
+16:#    TODO(dph) - Try and eliminate all global values.
+17:#    TODO(dph) - Seperate functions, globals and constants into seperate files and source them in
+18:#    TODO(dph) - Check to see if the script needs to be run as sudo or root
+19:#    TODO(dph) - Implement missing options: (-t long, -o csv)
+20:#    TODO(dph) - Clean up the HTML output as it is mixed.
+21:#    TODO(dph) - Change up all functions so globals are passed in versus assumed.
+22:#    TODO(dph) - Check if zpool command is available before executing.
+85:  #   TODO(dph): Think about shifting this to use the syslog
+112:  #   TODO(dph): Think about shifting this to use the syslog
+139:  #   TODO(dph): Change to use the syslog
+248:  #   TODO(dph): Switch to using a key-pair array for all global options.
+318:  #   TODO(dph): Finish implementation
+362:  #   TODO(dph): Update to use a passed in key-pair array vs a global
+395:  #   TODO(dph): Change to use in a passed array vs a global
+430:  #   TODO(dph): Switch to move away from global LIST_OF_DISKS
+486:  #   TODO(dph): Think about shifting this to use the syslog
+526:  #   TODO(dph): Think about shifting this to use the syslog
+594:  #   TODO(dph): Think about shifting this to use the syslog
+677:  #   TODO(dph): Remove dependency on globals
+819:  #   TODO(dph): Implement
+836:  #   TODO(dph): Implement
+854:  #   TODO(dph): Remove global dependency
+855:  #   TODO(dph): Add raspberry pi implementation
+899:  #   TODO(dph): Remove global dependency
+900:  #   TODO(dph): Separate network gathering into a new function
+1133:#  TODO(dph): Consolidate all the HTML functions into a single
