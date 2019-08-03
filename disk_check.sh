@@ -9,18 +9,17 @@
 #  - mmc-utils if host has eMMC cards
 #####
 
-## ToDo:
-#    - Need to add capability to read SD cards (raspberry pi)  Info is located at
-#      sys/block/mmcblk#.  Also can try the udevadm -a -c /dev/mmcblk# command
-#    - Need to add ability to get information about virtual disks
-#    - Try and eliminate all global values.
-#    - Seperate functions, globals and constants into seperate files and source them in
-#    - Check to see if the script needs to be run as sudo or root
-#    - Implement missing options:
-#      - -t long
-#      - -o csv
-#    - Clean up the HTML output as it is mixed.
-#    - Change up all functions so globals are passed in versus assumed.
+## Notes:
+#    TODO(dph) - Need to add capability to read SD cards (raspberry pi)  Info is located at
+#                sys/block/mmcblk#.  Also can try the udevadm -a -c /dev/mmcblk# command
+#    TODO(dph) - Need to add ability to get information about virtual disks
+#    TODO(dph) - Try and eliminate all global values.
+#    TODO(dph) - Seperate functions, globals and constants into seperate files and source them in
+#    TODO(dph) - Check to see if the script needs to be run as sudo or root
+#    TODO(dph) - Implement missing options: (-t long, -o csv)
+#    TODO(dph) - Clean up the HTML output as it is mixed.
+#    TODO(dph) - Change up all functions so globals are passed in versus assumed.
+#    TODO(dph) - Check if zpool command is available before executing.
 ##
 set -o nounset    # Exposes unset variables
 
@@ -66,12 +65,25 @@ declare -g -A LIST_OF_DISKS
 # the array can be sorted on major sections.
 declare -g -A SYS_INFO
 
+# An associative array that contains a listing of available zppols and their
+# status.
 declare -g -A LIST_OF_ZPOOLS
 
 ##### Debugging functions #####
 function log_info () {
-  # prints out information to standard output.  The severity level is passed
-  # in as well as the message to output.  NB: Think about shifting this to use the syslog
+  #######################################
+  # Description:
+  #   Pretty prints out information to standard output.
+  # Globals:
+  #    DEBUG
+  # Arguments:
+  #   $0  filename
+  #   $1  Message to output
+  # Returns:
+  #   $SUCCESS or $FAILURE
+  # Notes:
+  #   TODO(dph): Think about shifting this to use the syslog
+  #######################################
   local file_name=$0
   local src_line=${BASH_LINENO}
   local -u severity="INFO"
@@ -86,8 +98,19 @@ function log_info () {
 }
 
 function log_error() {
-  # prints out information to standard error.  The severity level is passed
-  # in as well as the message to output.
+  #######################################
+  # Description:
+  #   Pretty prints out information to standard error.
+  # Globals:
+  #    DEBUG
+  # Arguments:
+  #   $0  filename
+  #   $1  Message to output
+  # Returns:
+  #   $SUCCESS or $FAILURE
+  # Notes:
+  #   TODO(dph): Think about shifting this to use the syslog
+  #######################################
   local file_name=$0
   local src_line=${BASH_LINENO}
   local -u severity="ERROR"
@@ -102,20 +125,42 @@ function log_error() {
 }
 
 function log_info_array () {
-  # Given an associative array, print out its contents using the log_info
-  # function.
+  #######################################
+  # Description:
+  #   Given an associative array, print out the key-pair
+  #   using the log_info function.
+  # Globals:
+  #    None
+  # Arguments:
+  #   $1  Array
+  # Returns:
+  #   $SUCCESS or $FAILURE
+  # Notes:
+  #   TODO(dph): Change to use the syslog
+  #######################################
   local    key
   local -n keys=$1
   for key in ${!keys[@]}; do
     log_info  "$key : ${keys[$key]}"
   done
+  return $SUCCESS
 }
 
 function dump_stack () {
-# A simple call stack dumper.  The passed in parameter indicates which
-# level of the stack to start at.  Normally you would start at level 1,
-# which will not include the "dump_stack" function itself.  For calling from
-# a debugging function, start at level 2 to not include the logging function.
+  #######################################
+  # Description:
+  #   A simple call stack dumper.  The passed in parameter indicates which
+  #   level of the stack to start at.  Normally you would start at level 1,
+  #   which will not include the "dump_stack" function itself.  For calling from
+  #   a debugging function, start at level 2 to not include the logging function.
+  # Globals:
+  #   None
+  # Arguments:
+  #   $1  The function level to start at
+  # Returns:
+  #   A one dimmension array of the function stack
+  # Notes:
+  #######################################
   local -i i
   local -i start_level=$1
   local -a stack ret_stack
@@ -123,13 +168,23 @@ function dump_stack () {
     printf -v stack[$i] "%s" "${FUNCNAME[$i]}(${BASH_LINENO[$i-1]})."
   done
 
-  # remove the traling "."
+  # remove the trailing "."
   printf -v ret_stack "%s" "${stack[@]}"
   printf ${ret_stack%.*}
 }
 
 function die() {
-  # Prints out the full call stack and then exits.
+  #######################################
+  # Description:
+  #   Prints out the full call stack and then exits.
+  # Globals:
+  #    None
+  # Arguments:
+  #   None
+  # Returns:
+  #   $FAILURE
+  # Notes:
+  #######################################
   local -i frame=0
   log_info "ERROR" "Dumping call stack.."
   while caller $frame; do
@@ -140,6 +195,17 @@ function die() {
 
 ##### Command/Option Functions #####
 function usage () {
+  #######################################
+  # Description:
+  #   Pretty prints out the command usage.
+  # Globals:
+  #    None
+  # Arguments:
+  #   None
+  # Returns:
+  #   $SUCCESS
+  # Notes:
+  #######################################
   cat <<EOF
   Usage: $(basename $0): [-d] [-e email address] [-f filename] [-m y | n] [-s subject] [-o html | text]
      where:
@@ -162,13 +228,32 @@ EOF
 }
 
 function get_cmd_args () {
-  # NB:  Since this is early and we do not know any options, we cannot
-  # use functions that depend upon global options being set (aka: debug)
-  # To get around for debugging, save information to local vars and
-  # after all arguments have been priocessed, call the debugging functions.
+  #######################################
+  # Description:
+  #   Parses command options and sets globals
+  # Globals:
+  #    DEBUG
+  #    EMAIL_TO
+  #    O_FILE
+  #    MAIL_FILE
+  #    EMAIL_SUBJECT
+  #    O_FORMAT
+  #    PROG_NAME
+  #    AUTHOR
+  # Arguments:
+  #   $* Command line arguments
+  # Returns:
+  #   $SUCCESS
+  # Notes:
+  #   TODO(dph): Switch to using a key-pair array for all global options.
+  #
+  #   NB: Since this is early and we do not know any options, we cannot
+  #       use functions that depend upon global options being set (aka: debug)
+  #       To get around for debugging, save information to local vars and
+  #       after all arguments have been priocessed, call the debugging functions.
+  #######################################
   local passed_args="$*"
   local getopts
-
   while getopts 'vhde:f:m:s:o:' arg; do
     case $arg in
       d) DEBUG="y"
@@ -187,7 +272,7 @@ function get_cmd_args () {
       o) O_FORMAT="$OPTARG"
          ;;
       v)
-        printf "%s\n" "$PROG_NAME: $VERSION"
+        printf "%s\n" "$PROG_NAME: $VERSION by $AUTHOR."
         exit $SUCCESS
         ;;
     esac
@@ -197,7 +282,17 @@ function get_cmd_args () {
 }
 
 function check_file_exist() {
-  # Checks for the existance of a file and returns success or failire
+  #######################################
+  # Description:
+  #   Checks for the existance of a file and returns success or failire
+  # Globals:
+  #    None
+  # Arguments:
+  #   $1  File to check for
+  # Returns:
+  #   $SUCCESS or $FAILURE
+  # Notes:
+  #######################################
   local -r file="${1}"
   if [[ "${file}" = '' || ! -f "${file}" ]]; then
     return $FAILURE
@@ -207,14 +302,39 @@ function check_file_exist() {
 }
 
 function check_paramcondition () {
-  # Give a parameter, its warnning and error will return the param in a color code
+  #######################################
+  # Description:
+  #   Give a parameter, its warnning and error will return the
+  #   param in a color code according to warnd, error or good.
+  # Globals:
+  #    None
+  # Arguments:
+  #   $1 Parameter to check
+  #   $2 Warning threshold
+  #   $3 Error threshold
+  # Returns:
+  #   $SUCCESS or $FAILURE
+  # Notes:
+  #   TODO(dph): Finish implementation
+  #######################################
   local param_to_check=$1
   local param_warn=$2
   local param_err=$3
 }
 
 function validate_commands () {
-  # Given an array with a set of commands, if any are not available, exit the program.
+  #######################################
+  # Description:
+  #   Given an array with a set of commands, if any are
+  #   not available, exit the program.
+  # Globals:
+  #    None
+  # Arguments:
+  #   $1  Array of commands to check
+  # Returns:
+  #   $SUCCESS or $FAILURE
+  # Notes:
+  #######################################
   local command
   for command in $1; do
     if ! hash "$command" > /dev/null 2>&1; then
@@ -226,11 +346,25 @@ function validate_commands () {
 }
 
 function check_avail_commands () {
-  # Looks to see if the commands in the array passed are available on the system
-  # and stores the results in the GLOBAL associative LIST_OF_COMMANDS array
+  #######################################
+  # Description:
+  #   Looks to see if the commands in the array passed are available on the system
+  #   and stores the results in the passed associative array
+  # Globals:
+  #    LIST_OF_COMMANDS
+  #    DEBUG
+  # Arguments:
+  #   $1  Array of commands to check
+  #   $2  Message to output
+  # Returns:
+  #   $SUCCESS or $FAILURE
+  # Notes:
+  #   TODO(dph): Update to use a passed in key-pair array vs a global
+  #######################################
   local cmds_missing=0
-  local cmd k
+   local cmd k
   declare -A commands_to_check=$1
+#  declare -n command_array=$2
 
   for cmd in $commands_to_check; do
     LIST_OF_COMMANDS["$cmd"]=$TRUE
@@ -239,21 +373,29 @@ function check_avail_commands () {
       ((cmds_missing++))
     fi
   done
-
   if ((cmds_missing > 0)); then
     log_info  "$cmds_missing commands are missing or not in PATH."
   fi
-
   if [ $DEBUG == "y" ]; then log_info_array LIST_OF_COMMANDS; fi;
   return $SUCCESS
 }
 
 function is_command_available () {
-  # Checks the passed command and sees if it is listed as available
-  # Returns SUCCESS if available or FAILURE if not found or not available
+  #######################################
+  # Description:
+  #   Checks the passed command and sees if it is listed as available
+  # Globals:
+  #   DEBUG
+  #   LIST_OF_COMMANDS
+  # Arguments:
+  #   $1  command to check for
+  # Returns:
+  #  Returns $SUCCESS if available or $FAILURE if not found or not available
+  # Notes:
+  #   TODO(dph): Change to use in a passed array vs a global
+  #######################################
   local i
   local command_to_check_for=$1
-
   log_info  "Checking on status of $1 command."
   for i in ${!LIST_OF_COMMANDS[*]}; do
     if [[ $command_to_check_for == $i ]]; then
@@ -272,18 +414,28 @@ function is_command_available () {
 
 #####  Storage Related  #####
 function get_disks () {
-  # Gets the disk on the system.  It tries to get the most accurate and comprehensive
-  # list of disks depending upon the commands available on the machine.  It stores the
-  # disks found and their type in a sorted global array, LIST_OF_DISKS.
+  #######################################
+  # Description:
+  #   Gets the disk on the system.  It tries to get the most accurate and comprehensive
+  #   list of disks depending upon the commands available on the machine.  It stores the
+  #   disks found and their type in a sorted global array, LIST_OF_DISKS.
+  # Globals:
+  #   DEBUG
+  #   LIST_OF_DISKS
+  # Arguments:
+  #   None
+  # Returns:
+  #   $SUCCESS or $FAILURE
+  # Notes:
+  #   TODO(dph): Switch to move away from global LIST_OF_DISKS
+  #######################################
   local -a disks
   local    device
   local    i
   local    key
   local    keys
-
   # Use the best command for discovery.  The list is in what I believe
   # the best chance of getting the most disks.
-
   if is_command_available sysctl; then
     log_info  "Using sysctl command to obtain disks on the system."
     disks=$(sysctl -n kern.disks)
@@ -308,7 +460,6 @@ function get_disks () {
   for device in $disks; do
     LIST_OF_DISKS[$device]=$(get_disk_type "$device")
   done
-
   log_info  "The number of disks in the array are: ${#LIST_OF_DISKS[@]}"
   # Dump out the LIST_OF_DISK Dictionary but first sort by key name
   # to make reading a bit easier.
@@ -321,8 +472,19 @@ function get_disks () {
 }
 
 function get_disk_type () {
-  # Given a disk device, return (via printing it) the type of disk
-  # Calling method is via =$(get_disk_type disk)
+  #######################################
+  # Description:
+  #   Given a disk device, return (via printing it) the type of disk
+  #   Calling method is via =$(get_disk_type disk)
+  # Globals:
+  #   None
+  # Arguments:
+  #   $1  Disk to check
+  # Returns:
+  #   Type of disk
+  # Notes:
+  #   TODO(dph): Think about shifting this to use the syslog
+  #######################################
   local disk=$1
   local dev_type
   local results=$(smartctl -i /dev/$disk)
@@ -350,8 +512,19 @@ function get_disk_type () {
 }
 
 function clear_array_values () {
-  # Takes as input an associative array and clears the values for each key
-  # Note that this does not unset the key-pair, just clears the value of 
+  #######################################
+  # Description:
+  #   Takes as input an associative array and clears the values for each key
+  #   Note that this does not unset the key-pair, just clears the value
+  # Globals:
+  #   None
+  # Arguments:
+  #   $1  Array to clear
+  # Returns:
+  #   $SUCCESS or $FAILURE
+  # Notes:
+  #   TODO(dph): Think about shifting this to use the syslog
+  #######################################
   # the keys found.
   local    key
   local -n keys=$1
@@ -359,10 +532,23 @@ function clear_array_values () {
   for key in ${!keys[@]}; do
     disk_info[$key]=""
   done
+  return $SUCCESS
 }
 
 function print_disk_info () {
-  # Given an associative array, print out its contents the file specified.
+  #######################################
+  # Description:
+  #   Given an associative array, print out its contents the file specified.
+  # Globals:
+  #   None
+  # Arguments:
+  #   $1 Array to output
+  #   $2 Name of the file to output to
+  #   #3 Type of output (html or text)
+  # Returns:
+  #   $SUCCESS or $FAILURE
+  # Notes:
+  #######################################
   local    val
   local -n vals=$1
   local    fmt="| %-10.10s "
@@ -391,7 +577,22 @@ function print_disk_info () {
 }
 
 function get_disk_info () {
-  # Cycle thrrough the disks and collect information about the disk and print it out.
+  #######################################
+  # Description:
+  #   Cycle thrrough the disks and collect information about the
+  #   disk and print it out.
+  # Globals:
+  #    LIST_OF_DISKS
+  #    O_FILE
+  #    O_FORMAT
+  # Arguments:
+  #   $0  filename
+  #   $1  Message to output
+  # Returns:
+  #   $SUCCESS or $FAILURE
+  # Notes:
+  #   TODO(dph): Think about shifting this to use the syslog
+  #######################################
   local      i
   local      j
   local      key
@@ -462,6 +663,19 @@ function get_disk_info () {
 }
 
 function print_zpool_info () {
+  #######################################
+  # Description:
+  #   Prints out zpool information.
+  # Globals:
+  #    LIST_OF_ZPOOLS
+  #    O_FILE
+  # Arguments:
+  #   None
+  # Returns:
+  #   $SUCCESS
+  # Notes:
+  #   TODO(dph): Remove dependency on globals
+  #######################################
   local key
   printf "\n==============================\n" >> "${O_FILE}"
   printf "      ZFS Pool Information      \n" >> "${O_FILE}"
@@ -482,8 +696,19 @@ function print_zpool_info () {
 }
 
 function get_zpool_info () {
-  # Retrieves basic information about ZFS pools on the systems and stores
-  # them into the array passed.
+  #######################################
+  # Description:
+  #   Retrieves basic information about ZFS pools on the systems and stores
+  #   them into the array passed.
+  # Globals:
+  #    DEBUG
+  # Arguments:
+  #   $1 Array to store the list into
+  #   $1  Message to output
+  # Returns:
+  #   pool_info K/V pair array
+  # Notes:
+  #######################################
   local      pool_list
   local      pool
   declare -n pool_info=$1
@@ -499,11 +724,20 @@ function get_zpool_info () {
 }
 
 function get_zpool () {
-  # Gets a list of the zpools on the system and returns it
-  # To call use x=$(get_zpools [pool]) to store into an array
+  #######################################
+  # Description:
+  #   Gets a list of the zpools on the system and returns it
+  #   To call use x=$(get_zpools [pool]) to store into an array
+  # Globals:
+  #   None
+  # Arguments:
+  #   $1  pool to get information about [optiona]
+  # Returns:
+  #   The name of the pool or all pools if non passed
+  # Notes:
+  #######################################
   local pool=$1
   declare -a pool_list
-  log_info "Entering function"
   pool_list=$(zpool list -H -o name)
   log_info "Number of pools was ${#pool_list}"
   if [[ -z $pool ]]; then
@@ -514,7 +748,17 @@ function get_zpool () {
 }
 
 function check_zpool_errors () {
-  # Issues the status command to check zpools for errors
+  #######################################
+  # Description:
+  #   Issues the status command to check zpools for errors
+  # Globals:
+  #   None
+  # Arguments:
+  #   None
+  # Returns:
+  #   None
+  # Notes:
+  #######################################
   printf "\n==============================\n" >> "${O_FILE}"
   printf "      ZFS Pool Errors           \n" >> "${O_FILE}"
   printf "==================================\n" >> "${O_FILE}"
@@ -524,8 +768,18 @@ function check_zpool_errors () {
 
 #####  System related functions #####
 function get_cpu_info () {
-  # Retrieves varous infomation about the CPU and stores it in the
-  # SYS_INFO global array
+  #######################################
+  # Description:
+  #   Retrieves varous infomation about the CPU and stores it in the
+  #   SYS_INFO global array
+  # Globals:
+  #   SYS_INFO
+  # Arguments:
+  #   None
+  # Returns:
+  #   $SUCCESS
+  # Notes:
+  #######################################
   SYS_INFO[CPU_ARCH_TYPE]=$(uname -m)
   SYS_INFO[CPU_PROC_TYPE]=$(uname -p)
 
@@ -533,7 +787,6 @@ function get_cpu_info () {
     log_info  "OS_TYPE not defined.  Calling get_os_info"
     get_os_info
   fi
-
   log_info  "Checking for cpu count under ${SYS_INFO[OS_TYPE]}"
   case ${SYS_INFO[OS_TYPE]} in
     FreeBSD)
@@ -548,25 +801,59 @@ function get_cpu_info () {
       SYS_INFO[HOST_PHYS_MEM]=$(grep MemTotal /proc/meminfo)
       ;;
   esac
-
   log_info  "Number of cpus found is: ${SYS_INFO[CPU_NUMBER]}"
   return $SUCCESS
 }
 
 function get_hw_info () {
-  # Retrieve various hardware related information and store in the KV array
+  #######################################
+  # Description:
+  #   Retrieve various hardware related information and store in the KV array
+  # Globals:
+  #   None
+  # Arguments:
+  #  none
+  # Returns:
+  #   $SUCCESS
+  # Notes:
+  #   TODO(dph): Implement
+  #######################################
 
   return $SUCCESS
 }
 
 get_bios_info () {
-  # Retrieve information about the bios.  the dmidecode command is requried.
+  #######################################
+  # Description:
+  #   Retrieve information about the bios.  the dmidecode command is requried.
+  # Globals:
+  #   None
+  # Arguments:
+  #  none
+  # Returns:
+  #   $SUCCESS
+  # Notes:
+  #   TODO(dph): Implement
+  #######################################
 
   return $SUCCESS
 }
 
 function get_temps () {
-  # Get temperatures of various elements (board, cpu, etc.) and add to SYS_INFO array
+  #######################################
+  # Description:
+  #   Get temperatures of various elements (board, cpu, etc.) 
+  #   and add to SYS_INFO array
+  # Globals:
+  #   SYS_INFO
+  # Arguments:
+  #   None
+  # Returns:
+  #   $SUCCESS
+  # Notes:
+  #   TODO(dph): Remove global dependency
+  #   TODO(dph): Add raspberry pi implementation
+  #######################################
   local    i
   local -i num_cpu_temps=0
   local    cpu_temps
@@ -599,19 +886,30 @@ function get_temps () {
 }
 
 function get_host_info () {
-  # Retrieves infomration about the system and stores it into the SYS_INFO dictionary
+  #######################################
+  # Description:
+  #   Retrieves infomration about the system and stores it into the SYS_INFO dictionary
+  # Globals:
+  #   SYS_INFO
+  # Arguments:
+  #   None
+  # Returns:
+  #   $SUCCESS or $FAILURE
+  # Notes:
+  #   TODO(dph): Remove global dependency
+  #   TODO(dph): Separate network gathering into a new function
+  #######################################
   local    ip_addrs
   local -i num_ip_addrs=0
   local    i
 
-  SYS_INFO[HOST_NAME]=$(hostname -f | tr '[:lower:]' '[:upper:]')
-  # NB: Should fix to extract just hours and days up vs the entire string. 
-  #  SYS_INFO[HOST_UPTIME]=$(uptime | awk '{ print $3, $4, $5 }' | sed 's/,//g' | sed 's/\r//g')
+  SYS_INFO[HOST_NAME]=$(hostname -f)
+  SYS_INFO[HOST_SHORT_UPTIME]=$(uptime | awk '{ print $3, $4, $5 }' | sed 's/,//g' | sed 's/\r//g')
   SYS_INFO[HOST_UPTIME]=$(uptime)
+
   ip_addrs=($(ifconfig | grep -Eo 'inet (addr:)?([0-9]*\.){3}[0-9]*' | grep -Eo '([0-9]*\.){3}[0-9]*' | grep -v '127.0.0.1'))
   log_info  "Number of host ip addresses found is: ${#ip_addrs[@]}."
   SYS_INFO[HOST_IP_NUMBER]=${#ip_addrs[@]}
-
   # A system may have more than 1 ip address or interface.  Count the number and create an array with the ips.
   # We store all the ips found in HOST_IP and if more than 1, add unique SYS_INFO[HOST_IP_x] for each.
   if [[ ${#ip_addrs[@]} -gt 0 ]]; then
@@ -629,7 +927,17 @@ function get_host_info () {
 }
 
 function get_os_info () {
-  # Stores  info about the operating system in the SYS_INFO dictionary
+  #######################################
+  # Description:
+  #   Stores  info about the operating system in the SYS_INFO dictionary
+  # Globals:
+  #   SYS_INFO
+  # Arguments:
+  #   None
+  # Returns:
+  #   $SUCCESS or $FAILURE
+  # Notes:
+  #######################################
   SYS_INFO[OS_TYPE]=$(uname -s)
   SYS_INFO[OS_VER]=$(uname -o)
   SYS_INFO[OS_REL]=$(uname -r)
@@ -637,11 +945,22 @@ function get_os_info () {
 }
 
 function get_sys_info () {
-  # Collects various system information  and stores it in the global array.
-  # If KV pair not found, it will assume its a new one andpopo it onto
-  # the array.  For each value, we want to utilize a function to fill in the
-  # key-pair to allow for portability.  Ensure we collect any variables that
-  # are used to make decisions early (OS_TYPE, ARCH_TYPE, PROC_TYPE).
+  #######################################
+  # Description:
+  #   Collects various system information  and stores it in the global array.
+  #   If KV pair not found, it will assume its a new one andpopo it onto
+  #   the array.  For each value, we want to utilize a function to fill in the
+  #   key-pair to allow for portability.  Ensure we collect any variables that
+  #   are used to make decisions early (OS_TYPE, ARCH_TYPE, PROC_TYPE).
+  # Globals:
+  #   SYS_INFO
+  #   DEBUG
+  # Arguments:
+  #   None
+  # Returns:
+  #   $SUCCESS or $FAILURE
+  # Notes:
+  #######################################
   local    key
   local -a keys
 
@@ -663,8 +982,20 @@ function get_sys_info () {
 }
 
 function print_sys_info () {
-  # Prints out simple system information.  This simply dumps the 
-  # keys and values in the SYS_INFO array
+  #######################################
+  # Description:
+  #   Prints out simple system information.  This simply dumps the
+  #   keys and values in the SYS_INFO array
+  # Globals:
+  #   O_FORMAT
+  #   SYS_INFO
+  #   O_FILE
+  # Arguments:
+  #   None
+  # Returns:
+  #   $SUCCESS or $FAILURE
+  # Notes:
+  #######################################
   local    key
   local -a keys
 
@@ -684,7 +1015,7 @@ function print_sys_info () {
       printf "%s\n" "    System Information" >> $O_FILE
       printf "%s\n" "============================" >> ${O_FILE}
       for key in $keys; do
-        printf "%-25s %-25s\n" "$key:" "${SYS_INFO[$key]}" 
+        printf "%-25s %-25s\n" "$key:" "${SYS_INFO[$key]}"
       done | column >> ${O_FILE}
       draw_separator "=" 118
   esac
@@ -692,19 +1023,29 @@ function print_sys_info () {
 }
 
 ##### Some simple text based Output Functions #####
-
 function draw_separator () {
-  # Given a character and number, it prints out the character n times.  Do
-  # not pass the "-" character or a number.  Basically anything that would
-  # affect the format qualifier.
+  #######################################
+  # Description:
+  #   Given a character and number, it prints out the character n times.  Do
+  #   not pass the "-" character or a number.  Basically anything that would
+  #   affect the format qualifier.
+  # Globals:
+  #   O_FILE
+  # Arguments:
+  #   $1  Character to display
+  #   $2  Number of characters to output
+  # Returns:
+  #   $SUCCESS or $FAILURE
+  # Notes:
+  #######################################
   local output_char=$1
   local -i num_chars=$2
   local output_line=$(printf "$output_char%.0s" `(seq 1 $num_chars)`; echo)
   echo $output_line  >> ${O_FILE}
+  return $SUCCESS
 }
 
 ##### Some simple HTML Output Functions #####
-
 function start_table () {
   echo "<table id="storage" border=2 cellpadding=4>" >> ${O_FILE}
 }
@@ -736,11 +1077,23 @@ function start_row () {
 }
 
 function end_row () {
+  #######################################
   echo "</tr>" >> ${O_FILE};
   return $SUCCESS
 }
 
 function print_row() {
+  #######################################
+  # Description:
+  #  Given an array, print out each element in an HTML table row.
+  # Globals:
+  #    None
+  # Arguments:
+  #   $@  An array of data to be put into a table row
+  # Returns:
+  #   $SUCCESS
+  # Notes:
+  #######################################
   local i
   start_row
   for i in "$@"; do
@@ -751,23 +1104,36 @@ function print_row() {
 }
 
 ##### Document functions #####
-
 function create_mail_header () {
-#  Create the email header.  Pass in the email addresses, subject and the output file.
+  #######################################
+  # Description:
+  #  Create the email header.  Pass in the email addresses, subject and the output file.
+  # Globals:
+  #   None
+  # Arguments:
+  #   $1  email addres.  If more than 1, separate by commas
+  #   $2  subject of the email
+  #   $3  name of the file to out put to
+  # Returns:
+  #   $SUCCESS or $FAILURE
+  # Notes:
+  #######################################
   local to_addr=$1
-  local subject=$2
+  local subject="$2"
   local output_file=$3
-  (
-   echo To: $EMAIL_TO
-   echo Subject: $MAIL_SUBJECT
-   echo Content-Type: text/html
-   echo MIME-Version: 1.0
-   echo Content-Disposition: inline
-  ) > ${O_FILE}
+  log_info "$to_addr : $subject : $output_file"
+  printf "%s\n" "To: $to_addr" >> ${output_file}
+  printf "%s\n" "Subject: $subject" >> ${output_file}
+  printf "%s\n" "echo Content-Type: text/html"  >> ${output_file}
+  printf "%s\n" "MIME-Version: 1.0"  >> ${output_file}
+  printf "%s\n" "Content-Disposition: inline" >> ${output_file}
   return $SUCCESS
 }
 
+#  TODO(dph): Consolidate all the HTML functions into a single
+#             function.
 function create_table_header () {
+  #
  local blank=" "
  case $O_FORMAT in
     html)
@@ -799,12 +1165,12 @@ function create_results_header () {
       print_raw "h1 {font-size: 75pct; color: blue; font: monospace}"
       print_raw "</head>"
       print_raw "<body>"
-      print_raw "<h1>Status for Disks Found on $HOST_NAME on $(date '+%Y-%m-%d')</h1>"
+      print_raw "<h1>Status for Disks Found on $HOST_NAME on $(date)</h1>"
       ;;
 
     text)
       printf "%s\n" "<html><body><pre style='font: monospace'>" >> ${O_FILE}
-      printf "%s\n" "Status for disks found on $HOST_NAME on $(date '+$Y-%m-$d')" >> ${O_FILE}
+      printf "%s\n" "Status for disks found on $HOST_NAME on $(date)" >> ${O_FILE}
       ;;
   esac
   return $SUCCESS
@@ -854,7 +1220,7 @@ validate_commands "${REQ_CMDS[@]}"
 get_sys_info
 
 # Create the document
-create_mail_header $EMAIL_TO $MAIL_SUBJECT $O_FILE
+if [[ $MAIL_FILE == "y" ]]; then create_mail_header "${EMAIL_TO}" "${MAIL_SUBJECT}" $O_FILE; fi;
 create_results_header
 print_sys_info
 create_table_header
