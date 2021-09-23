@@ -21,13 +21,14 @@
 # TODO(dph) - Change up all functions so globals are passed in versus assumed.
 # TODO(dph) - Check if zpool command is available before executing.
 # TODO(dph) - Add error checking for function calls instead of just calling die.
+# TODO(DPH) - Make these environmental variables.
 #   
 ##
 set -o nounset # Exposes unset variables
 
 ##### Constants #####
 declare -r AUTHOR="David Hunter"
-declare -r VERSION="Version 0.5 beta"
+declare -r VERSION="Version 0.6 beta"
 declare -r PROG_NAME="disk_check.sh"
 declare -r TRUE="YES"
 declare -r FALSE="NO"
@@ -41,17 +42,17 @@ declare -r -i BASH_MIN_VER=${BASH_VERSINFO[1]}
 # Required commands and optional commands.  The script will not function
 # without required commands.  The script MAY function without an optional command.
 declare -a REQ_CMDS="awk uname hostname smartctl uptime hostname hash wc"
-declare -a OPT_CMDS="sysctl geom lsblk dmidecode lshw blkid pr column"
-declare -a ALL_CMDS="$REQ_CMDS $OPT_CMDS"
+declare -a OPT_CMDS="sysctl geom lsblk dmidecode lshw blkid pr column zpool"
+declare -a REQ_LINUX_CMDS="sensors"
+declare -a ALL_CMDS="$REQ_CMDS $OPT_CMDS $REQ_LINUX_CMDS" 
 
 ##### Global Variables #####
 declare -g -l DEBUG="n"
-declare -g -l MAIL_FILE="y"
-declare -g -l O_FORMAT="html"
+declare -g -l MAIL_FILE="declare -g -l O_FORMAT="html""
 declare -g -l O_FILE="/tmp/disk_overview.html"
 declare -g EMAIL_TO="user@company.com"
 declare -g -l HOST_NAME=$(hostname -f)
-declare -g MAIL_SUBJECT="FreeNAS SMART and Disk Summary for $HOST_NAME on $(date)"
+declare -g MAIL_SUBJECT="SMART and Disk Summary for $HOST_NAME on $(date)"
 
 # An assoicative array (sometimes called a dictionary) that holds system commands and if
 # they are available on the system.  This will get filled in the commands are tested. The
@@ -286,7 +287,7 @@ function get_cmd_args() {
   #######################################
   local passed_args="$*"
   local getopts
-  while getopts 'vhde:f:m:s:o:' arg; do
+  while getopts 'vhde:f:m:s:o:z:' arg; do
     case $arg in
     d)
       DEBUG="y"
@@ -308,6 +309,9 @@ function get_cmd_args() {
       ;;
     o)
       O_FORMAT="$OPTARG"
+      ;;
+    z)
+      ZPOOL="$OPTARG"
       ;;
     v)
       printf "%s\n" "$PROG_NAME: $VERSION by $AUTHOR."
@@ -474,15 +478,16 @@ function get_disks() {
   local keys
   # Use the best command for discovery.  The list is in what I believe
   # the best chance of getting the most disks.
-  if is_command_available sysctl; then
+  if is_command_available lsblk; then
+    log_info "Using the lsblk command to obtain disks on the system."
+    disks=$(lsblk -dp | grep -o '^/dev[^ ]*' | sed 's/\/dev\///')
+#    disks=$(lsblk --nodeps --noheadings --output name,type --scsi | awk {'print $1'})
+  elif is_command_available sysctl; then
     log_info "Using sysctl command to obtain disks on the system."
     disks=$(sysctl -n kern.disks)
   elif is_command_available geom; then
     log_info "Using geom command to obtain disks on the system."
     disks=$(geom disk list | grep Name | awk '{print $3}')
-  elif is_command_available lsblk; then
-    log_info "Using the lsblk command to obtain disks on the system."
-    disks=$(lsblk -dp | grep -o '^/dev[^ ]*' | sed 's/\/dev\///')
   else
     log_info "ERROR" "Unable to find a command to get disks.  Aborting."
     err "Unable to find a command to get disks. Aborting."
@@ -835,8 +840,9 @@ function get_cpu_info() {
 
   Linux)
     SYS_INFO[CPU_NUMBER]=$(grep -c '^processor' /proc/cpuinfo)
-    SYS_INFO[CPU_MODEL]=$(grep 'model name' /proc/cpuinfo)
-    SYS_INFO[HOST_PHYS_MEM]=$(grep MemTotal /proc/meminfo)
+    SYS_INFO[CPU_CORE_COUNT]=$(grep -c '^cpu cores' /proc/cpuinfo)
+    SYS_INFO[CPU_MODEL]=$(cat /proc/cpuinfo | grep 'model name' | head -1 | awk 'BEGIN {FS=":"}; {print $2}' |sed -e 's/^[ \t]*//')
+    SYS_INFO[HOST_PHYS_MEM]=$(grep 'MemTotal' /proc/meminfo)
     ;;
   esac
   log_info "Number of cpus found is: ${SYS_INFO[CPU_NUMBER]}"
@@ -915,7 +921,7 @@ function get_temps() {
     ;;
 
   Linux)
-    SYS_INFO[HOST_CORE_TEMP]=0
+    SYS_INFO[HOST_CORE_TEMP]="$(sensors | grep 'Core 0' | awk '{print $3}')"
     CPU_TEMP=0
     ;;
     # For raspberry pi use /opt/vc/bin/vcgencmd measure_temp
@@ -1211,7 +1217,6 @@ function create_results_header() {
     ;;
 
   text)
-    printf "%s\n" "<html><body><pre style='font: monospace'>" >>${O_FILE}
     printf "%s\n" "Status for disks found on $HOST_NAME on $(date)" >>${O_FILE}
     ;;
   esac
@@ -1285,10 +1290,13 @@ create_table_header
 get_disks
 get_disk_info
 
-# Get zpool information
-get_zpool_info LIST_OF_ZPOOLS
-print_zpool_info
-check_zpool_errors
+# Get zpool information if available
+if [ ${LIST_OF_COMMANDS[zpool]} == "YES" ]; then
+  get_zpool_info LIST_OF_ZPOOLS
+  echo "$(LIST_OF_ZPOOLS)"
+  print_zpool_info
+  check_zpool_errors
+fi
 
 # Clean up, and optionally mail the document
 end_table
