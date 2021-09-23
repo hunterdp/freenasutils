@@ -13,17 +13,12 @@
 # TODO(dph) - Need to add capability to read SD cards (raspberry pi)  Info is located at
 #             sys/block/mmcblk#.  Also can try the udevadm -a -c /dev/mmcblk# command
 # TODO(dph) - Need to add ability to get information about virtual disks
-# TODO(dph) - Try and eliminate all global values.
-# TODO(dph) - Seperate functions, globals and constants into seperate files and source them in
 # TODO(dph) - Check to see if the script needs to be run as sudo or root
-# TODO(dph) - Implement missing options: (-t long, -o csv)
-# TODO(dph) - Clean up the HTML output as it is mixed.
 # TODO(dph) - Change up all functions so globals are passed in versus assumed.
-# TODO(dph) - Check if zpool command is available before executing.
 # TODO(dph) - Add error checking for function calls instead of just calling die.
 # TODO(DPH) - Make these environmental variables.
-#   
-##
+#
+#
 set -o nounset # Exposes unset variables
 
 ##### Constants #####
@@ -44,12 +39,12 @@ declare -r -i BASH_MIN_VER=${BASH_VERSINFO[1]}
 declare -a REQ_CMDS="awk uname hostname smartctl uptime hostname hash wc"
 declare -a OPT_CMDS="sysctl geom lsblk dmidecode lshw blkid pr column zpool"
 declare -a REQ_LINUX_CMDS="sensors"
-declare -a ALL_CMDS="$REQ_CMDS $OPT_CMDS $REQ_LINUX_CMDS" 
+declare -a ALL_CMDS="$REQ_CMDS $OPT_CMDS $REQ_LINUX_CMDS"
 
 ##### Global Variables #####
 declare -g -l DEBUG="n"
-declare -g -l MAIL_FILE="declare -g -l O_FORMAT="html""
-declare -g -l O_FILE="/tmp/disk_overview.html"
+declare -g -l MAIL_FILE="declare -g -l"
+declare -g -l O_FILE="/tmp/disk_overview.txt"
 declare -g EMAIL_TO="user@company.com"
 declare -g -l HOST_NAME=$(hostname -f)
 declare -g MAIL_SUBJECT="SMART and Disk Summary for $HOST_NAME on $(date)"
@@ -72,7 +67,6 @@ declare -g -A SYS_INFO
 # status.
 declare -g -A LIST_OF_ZPOOLS
 
-##### Debugging functions #####
 function log_info() {
   #######################################
   # Description:
@@ -146,7 +140,6 @@ function log_info_array() {
   return $SUCCESS
 }
 
-
 function echo_info_array() {
   #######################################
   # Description:
@@ -203,7 +196,7 @@ function die() {
   # Globals:
   #    None
   # Arguments:
-  #   msg             str 
+  #   msg             str
   #   call_frame_dump bool
   # Returns:
   #   $FAILURE
@@ -212,8 +205,7 @@ function die() {
   local -i frame=0
   local msg
   msg=$1
-  if [ $# == 2 ]
-  then
+  if [ $# == 2 ]; then
     call_stack=$2
     log_info "$msg"
     log_info "Dumping call stack.."
@@ -222,11 +214,10 @@ function die() {
       ((frame++))
     done
   fi
-  
+
   exit $FAILURE
 }
 
-##### Command/Option Functions #####
 function usage() {
   #######################################
   # Description:
@@ -244,12 +235,9 @@ function usage() {
      where:
        -d                             turn on debug
        -e email_address               email address to send the file to
-       -f filename                    filename to
+       -f filename                    filename to save info to (default /tmp/disk_overview.txt)
        -m y|n                         mail the file or not
        -s subject                     subject of email
-       -o html|text                   output in either html or formatted text
-       -t long|short                  how much detail to include.  If long, include individual disk
-                                      information after table.
        -v                             prints out version of program
        -z                             prints out information on zpools if available
 
@@ -270,7 +258,6 @@ function get_cmd_args() {
   #    O_FILE
   #    MAIL_FILE
   #    EMAIL_SUBJECT
-  #    O_FORMAT
   #    PROG_NAME
   #    AUTHOR
   # Arguments:
@@ -280,14 +267,10 @@ function get_cmd_args() {
   # Notes:
   #   TODO(dph): Switch to using a key-pair array for all global options.
   #
-  #   NB: Since this is early and we do not know any options, we cannot
-  #       use functions that depend upon global options being set (aka: debug)
-  #       To get around for debugging, save information to local vars and
-  #       after all arguments have been priocessed, call the debugging functions.
   #######################################
   local passed_args="$*"
   local getopts
-  while getopts 'vhde:f:m:s:o:z:' arg; do
+  while getopts 'vhde:f:m:s:z:' arg; do
     case $arg in
     d)
       DEBUG="y"
@@ -306,9 +289,6 @@ function get_cmd_args() {
       ;;
     s)
       EMAIL_SUBJECT="$OPTARG"
-      ;;
-    o)
-      O_FORMAT="$OPTARG"
       ;;
     z)
       ZPOOL="$OPTARG"
@@ -357,7 +337,6 @@ function check_paramcondition() {
   # Returns:
   #   $SUCCESS or $FAILURE
   # Notes:
-  #   TODO(dph): Finish implementation
   #######################################
   local param_to_check=$1
   local param_warn=$2
@@ -481,7 +460,7 @@ function get_disks() {
   if is_command_available lsblk; then
     log_info "Using the lsblk command to obtain disks on the system."
     disks=$(lsblk -dp | grep -o '^/dev[^ ]*' | sed 's/\/dev\///')
-#    disks=$(lsblk --nodeps --noheadings --output name,type --scsi | awk {'print $1'})
+    #    disks=$(lsblk --nodeps --noheadings --output name,type --scsi | awk {'print $1'})
   elif is_command_available sysctl; then
     log_info "Using sysctl command to obtain disks on the system."
     disks=$(sysctl -n kern.disks)
@@ -597,23 +576,13 @@ function print_disk_info() {
   local fmt="| %-10.10s "
   local pretty_val
   local output_file=$2
-  local output_type=$3
   # We have the list of disk and disk types in associative array as it should be prefixed by
   # a letter in the  alphabetical order to be printed. Do this by creating an index array of
   # the indexes, sort that array and use it to itterate through the passed array
   keys=$(echo ${!vals[@]} | tr ' ' '\012' | sort | tr '\012' ' ')
   for key in $keys; do
-    case $output_type in
-    html)
-      print_row "$i" "$dev_type" "$model" "$ser_num" "$capacity" "$max_speed" "$cur_speed" \
-        "$pwr_on_hrs" "$start_stop_ct" "$total_seeks" \
-        "$spin_errors" "$cmd_errors" "$bad_sectors" "$temp"
-      ;;
-    text)
-      pretty_val=$(echo "${vals[$key]}" | tr '\n' ' ')
-      printf "$fmt" "${vals[$key]}" >>$output_file
-      ;;
-    esac
+    pretty_val=$(echo "${vals[$key]}" | tr '\n' ' ')
+    printf "$fmt" "${vals[$key]}" >>$output_file
   done
   printf "|\n" >>$output_file
   return $SUCCESS
@@ -627,14 +596,12 @@ function get_disk_info() {
   # Globals:
   #    LIST_OF_DISKS
   #    O_FILE
-  #    O_FORMAT
   # Arguments:
   #   $0  filename
   #   $1  Message to output
   # Returns:
   #   $SUCCESS or $FAILURE
   # Notes:
-  #   TODO(dph): Think about shifting this to use the syslog
   #######################################
   local i
   local j
@@ -699,7 +666,7 @@ function get_disk_info() {
       ;;
     esac
     log_info_array disk_info
-    print_disk_info disk_info "${O_FILE}" "${O_FORMAT}"
+    print_disk_info disk_info "${O_FILE}"
   done
   draw_separator "=" 118
   return $SUCCESS
@@ -832,6 +799,7 @@ function get_cpu_info() {
   fi
   log_info "Checking for cpu count under ${SYS_INFO[OS_TYPE]}"
   case ${SYS_INFO[OS_TYPE]} in
+
   FreeBSD)
     SYS_INFO[CPU_NUMBER]=$(sysctl -n hw.ncpu)
     SYS_INFO[CPU_MODEL]=$(sysctl -n hw.model)
@@ -841,8 +809,8 @@ function get_cpu_info() {
   Linux)
     SYS_INFO[CPU_NUMBER]=$(grep -c '^processor' /proc/cpuinfo)
     SYS_INFO[CPU_CORE_COUNT]=$(grep -c '^cpu cores' /proc/cpuinfo)
-    SYS_INFO[CPU_MODEL]=$(cat /proc/cpuinfo | grep 'model name' | head -1 | awk 'BEGIN {FS=":"}; {print $2}' |sed -e 's/^[ \t]*//')
-    SYS_INFO[HOST_PHYS_MEM]=$(grep 'MemTotal' /proc/meminfo)
+    SYS_INFO[CPU_MODEL]=$(cat /proc/cpuinfo | grep 'model name' | head -1 | awk 'BEGIN {FS=":"}; {print $2}' | sed -e 's/^[ \t]*//')
+    SYS_INFO[HOST_PHYS_MEM]=$(grep 'MemTotal' /proc/meminfo | grep 'MemTotal' | awk 'BEGIN {FS=":"}; {print $2}' | sed -e 's/^[ \t]*//')
     ;;
   esac
   log_info "Number of cpus found is: ${SYS_INFO[CPU_NUMBER]}"
@@ -880,6 +848,10 @@ get_bios_info() {
   #   TODO(dph): Implement
   #######################################
 
+  SYS_INFO[BIOS_VENDOR]=$(dmidecode -s bios-vendor)
+  SYS_INFO[BIOS_VERSION]=$(dmidecode -s bios-version)
+  SYS_INFO[BIOS_REL_DATE]=$(dmidecode -s bios-release-date)
+  SYS_INFO[FIRMWARE_REV]=$(dmidecode -s firmware-revision)
   return $SUCCESS
 }
 
@@ -895,7 +867,6 @@ function get_temps() {
   # Returns:
   #   $SUCCESS
   # Notes:
-  #   TODO(dph): Remove global dependency
   #   TODO(dph): Add raspberry pi implementation
   #######################################
   local i
@@ -940,7 +911,6 @@ function get_host_info() {
   # Returns:
   #   $SUCCESS or $FAILURE
   # Notes:
-  #   TODO(dph): Remove global dependency
   #   TODO(dph): Separate network gathering into a new function
   #######################################
   local ip_addrs
@@ -967,6 +937,12 @@ function get_host_info() {
     SYS_INFO[HOST_IP]="0.0.0.0"
     log_info "IP address not found, setting to ${SYS_INFO[HOST_IP]}."
   fi
+
+  SYS_INFO[PRODUCT_NAME]=$(dmidecode -s system-product-name)
+  SYS_INFO[MANUFACURER]=$(dmidecode -s system-manufacturer)
+  SYS_INFO[SYS_SERIAL_NUM]=$(dmidecode -s system-serial-number)
+  SYS_INFO[SYSTEM_VERSION]=$(dmidecode -s system-version)
+
   return $SUCCESS
 }
 
@@ -1015,8 +991,6 @@ function get_sys_info() {
   get_host_info
   get_temps
 
-  # Dump out the SYS_INFO Dictionary but first sort by key name
-  # to make reading a bit easier.
   if [ $DEBUG == "y" ]; then
     local keys=$(echo ${!SYS_INFO[@]} | tr ' ' '\012' | sort | tr '\012' ' ')
     log_info "Dumping the SYS_INFO Dictionary..."
@@ -1031,7 +1005,6 @@ function print_sys_info() {
   #   Prints out simple system information.  This simply dumps the
   #   keys and values in the SYS_INFO array
   # Globals:
-  #   O_FORMAT
   #   SYS_INFO
   #   O_FILE
   # Arguments:
@@ -1044,26 +1017,14 @@ function print_sys_info() {
   local -a keys
 
   local keys=$(echo ${!SYS_INFO[@]} | tr ' ' '\012' | sort | tr '\012' ' ')
-  case $O_FORMAT in
-  html)
-    print_raw "<p>"
-    for key in $keys; do
-      print_raw "<b>$key:          </b> ${SYS_INFO[$key]}<br>"
-    done
-    print_raw "</p>"
-    ;;
-
-  text)
-    local fmt="%-60.60s%-60.60s%60.60s\n"
-    printf "%s\n" "============================" >>${O_FILE}
-    printf "%s\n" "    System Information" >>$O_FILE
-    printf "%s\n" "============================" >>${O_FILE}
-    for key in $keys; do
-      printf "%-25s %-25s\n" "$key:" "${SYS_INFO[$key]}"
-    done | column >>${O_FILE}
-    draw_separator "=" 118
-    ;;
-  esac
+  local fmt="%-60.60s%-60.60s%60.60s\n"
+  printf "%s\n" "============================" >>${O_FILE}
+  printf "%s\n" "    System Information" >>$O_FILE
+  printf "%s\n" "============================" >>${O_FILE}
+  for key in $keys; do
+    printf "%-25s %-25s\n" "$key:" "${SYS_INFO[$key]}"
+  done | column >>${O_FILE}
+  draw_separator "=" 118
   return $SUCCESS
 }
 
@@ -1093,25 +1054,8 @@ function draw_separator() {
   return $SUCCESS
 }
 
-##### Some simple HTML Output Functions #####
-function start_table() {
-  echo "<table id="storage" border=2 cellpadding=4>" >>${O_FILE}
-}
-
 function end_table() {
-  case $O_FORMAT in
-  html)
-    print_raw "</table>"
-    ;;
-  text)
-    draw_separator "=" 118
-    ;;
-  esac
-}
-
-function print_td() {
-  echo "<td>$1</td>" >>${O_FILE}
-  return $SUCCESS
+  draw_separator "=" 118
 }
 
 function print_raw() {
@@ -1119,39 +1063,6 @@ function print_raw() {
   return $SUCCESS
 }
 
-function start_row() {
-  echo "<tr>" >>${O_FILE}
-  return $SUCCESS
-}
-
-function end_row() {
-  #######################################
-  echo "</tr>" >>${O_FILE}
-  return $SUCCESS
-}
-
-function print_row() {
-  #######################################
-  # Description:
-  #  Given an array, print out each element in an HTML table row.
-  # Globals:
-  #    None
-  # Arguments:
-  #   $@  An array of data to be put into a table row
-  # Returns:
-  #   $SUCCESS
-  # Notes:
-  #######################################
-  local i
-  start_row
-  for i in "$@"; do
-    print_td "$i"
-  done
-  end_row
-  return $SUCCESS
-}
-
-##### Document functions #####
 function create_mail_header() {
   #######################################
   # Description:
@@ -1178,65 +1089,26 @@ function create_mail_header() {
   return $SUCCESS
 }
 
-#  TODO(dph): Consolidate all the HTML functions into a single
-#             function.
 function create_table_header() {
-  #
   local blank=" "
-  case $O_FORMAT in
-  html)
-    print_raw "<table border=2 cellpadding=4>"
-    print_row "Device" "Type" "Model" "Serial #" "Capacity" "Temp" "Current Speed" \
-      "Max Speed" "Hours Powered On" "Start/Stop Count" "Total Seeks" \
-      "End to End Errors" "Spin Retries" "Command Timeouts" "Reallocated Sectors"
-    ;;
+  fmt="| %-10.10s | %-10.10s | %-10.10s | %-10.10s | %-10.10s | %-10.10s | %-10.10s | %-10.10s | %-10.10s |\n"
+  printf "$fmt" "$blank" "$blank" "$blank" "Serial" "$blank" "$blank" "Current" "Hours" "Start/Stop" >>${O_FILE}
 
-  \
-    text)
-    fmt="| %-10.10s | %-10.10s | %-10.10s | %-10.10s | %-10.10s | %-10.10s | %-10.10s | %-10.10s | %-10.10s |\n"
-    printf "$fmt" "$blank" "$blank" "$blank" "Serial" "$blank" "$blank" "Current" "Hours" "Start/Stop" >>${O_FILE}
-
-    printf "$fmt" "Device" "Type" "Model" "Number" "Capacity" "Temp" "Speed" "Powered On" "Count" >>${O_FILE}
-    draw_separator "=" 118
-    ;;
-  esac
+  printf "$fmt" "Device" "Type" "Model" "Number" "Capacity" "Temp" "Speed" "Powered On" "Count" >>${O_FILE}
+  draw_separator "=" 118
   return $SUCCESS
 }
 
 function create_results_header() {
-  case $O_FORMAT in
-  html)
-    print_raw "<!DOCTYPE html>"
-    print_raw "<html>"
-    print_raw "<head>"
-    print_raw "p {font-size: 75; color: back; font: monospace}"
-    print_raw "h1 {font-size: 75pct; color: blue; font: monospace}"
-    print_raw "</head>"
-    print_raw "<body>"
-    print_raw "<h1>Status for Disks Found on $HOST_NAME on $(date)</h1>"
-    ;;
-
-  text)
-    printf "%s\n" "Status for disks found on $HOST_NAME on $(date)" >>${O_FILE}
-    ;;
-  esac
+  printf "%s\n" "Status for disks found on $HOST_NAME on $(date)" >>${O_FILE}
   return $SUCCESS
 }
 
 function end_document() {
-  case $O_FORMAT in
-  html)
-    print_raw "</body></html>"
-    ;;
-  text)
-    print_raw "</pre></body></html>"
-    ;;
-  esac
+  print_raw ""
 }
 
-# Main script starts here 
-#
-#
+# Main script starts here
 # The basic flow is:
 #  1.  Look for which commands are available to be used to get various system, disk
 #      network and other information.
@@ -1285,7 +1157,6 @@ if [[ $MAIL_FILE == "y" ]]; then create_mail_header "${EMAIL_TO}" "${MAIL_SUBJEC
 create_results_header
 print_sys_info
 create_table_header
-
 # Go and get the disk information
 get_disks
 get_disk_info
