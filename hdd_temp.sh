@@ -1,5 +1,4 @@
 #!/bin/sh
-
 # Display current temperature of CPU(s) and all SMART-enabled drives
 
 # Full path to 'smartctl' program:
@@ -7,7 +6,7 @@ smartctl=/usr/local/sbin/smartctl
 
 # We need a list of the SMART-enabled drives on the system. Choose one of these
 # three methods to provide the list. Comment out the two unused sections of code.
-
+#
 # 1. A string constant; just key in the devices you want to report on here:
 #drives="da1 da2 da3 da4 da5 da6 da7 da8 ada0"
 
@@ -17,7 +16,7 @@ smartctl=/usr/local/sbin/smartctl
 #then printf ${drive}" "; fi done | awk '{for (i=NF; i!=0 ; i--) print $i }')
 
 # 3. A smartctl-based function:
-
+#
 get_smart_drives()
 {
   gs_smartdrives=""
@@ -33,8 +32,6 @@ get_smart_drives()
 }
 
 drives=$(get_smart_drives)
-
-# end of method 3.
 
 # Get CPU information
  
@@ -52,11 +49,8 @@ for core in $(seq 0 $cpucores); do
 done
 echo ""
 
-
 # Get Drive Information
-
 echo "=== DRIVES ==="
-
 for drive in $drives; do
   serial=$("$smartctl" -i "$drive" | grep -i "serial number" | awk '{print $NF}')
   capacity=$("$smartctl" -i "$drive" | grep "User Capacity" | awk '{print $5 $6}')

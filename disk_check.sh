@@ -576,6 +576,7 @@ function print_disk_info() {
   local fmt="| %-10.10s "
   local pretty_val
   local output_file=$2
+
   # We have the list of disk and disk types in associative array as it should be prefixed by
   # a letter in the  alphabetical order to be printed. Do this by creating an index array of
   # the indexes, sort that array and use it to itterate through the passed array
