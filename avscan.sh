@@ -1,87 +1,228 @@
-#!/bin/sh
-
-# DPH - 20-Apr-2019
-# - Copied from
-#   www.ixsystems.com/community/resources/howw-to-install-clamav-on-freenas-v11.66
-# - Used to scan the shared windows home director used for backup.
+#!/bin/sh 
+# AUTHOR:   David Hunter (dph@alumni.neu.edu)
 #
-# DPH 22-Apr-2019
-# - Modified to store the log files in a tmp directory on the shared mount
+# Shell script to run a clamav scan and prepare an email the results.
+# Uses ssmtp to send the email.  The script assumes that ssmtp is setup
+# correctly and uses the system-wide configurations.
 #
-# Shell scripts to update the ClamAV definations, then run a scan and prepare an
-# email template
-# This script is called from a master script running as a cron job on the FreeNAS ser
-# Master script is: run_clamav_scan.sh
+# Currently, this does not move or isolate any infected files.  It just
+# reports the infection.  For most cases this is fine and once the report
+# is reviewed, the appropriate action can be taken.  This is the safest
+# model for production systems.
 #
-# Instructions
-# 1) To use this you need to create a Jail called "Clam
-# 2) Open a Shall to the jail and then run: "pkg update"
-# 3) The run: "pkg install clamav"
-# 4) You can then "exit" the Jail
-# 5) Add the windows shares you wish to scan by using the Jail Add Storage feature
-# 5a) Add the shares to same location you use in the variable: "scanlocation
-# 6) Setp a cronjob on the FreeNAS server to run a shell script on the FreeNAS
-#    server: "run_clamav_scan.sh"
-# 7) The shell script "run_clamav_scan.sh" then connects to the Jail and runs this script.
-# 8) Once finished, the "run_clamav_scan.sh" script emails a log to the email entered in
-#    the variable: "to_email"
-#
-# https://www.clamav.net/
-# ClamAV is an open source (GPL) anti-virus engine used in a variety of situations including
-# email scanning, web scanning, and end point security. It provides a number of utilities
-# including a flexible and scalable multi-threaded daemon, a command
-# line scanner and an advanced tool for automatic database updates.
-#
-# Parameters
-#   email address
-to_email="dph@alumni.neu.edu"
+# This is best placed in a cron job.  It does daily scans as well as a
+# full system scan (/) once a week on the defined date.
+# 
 
-# Top directory of the files/directories you wish to scan, i.e. the "Jail Add Storage" locations
-scanlocation="/mnt/home"
+##----------------------------------- ##
+## Modify these to fit your use case. ##
+##----------------------------------- ##
+# The email receipient
+TO_EMAIL="hunterdp.hpe@gmail.com"
 
-# Update anti-virus definations
-freshclam -l /var/log/clamav/freshclam.log
+# The top level directories to scan.  The scan will travese the directory
+DAILY_DIR_TO_SCAN="/home/dph/Downloads"
+WEEKLY_DIR_TO_SCAN="/"
 
-# Run the anti-virus scan
-started=$(date "+ClamAV Scan on FreeNAS Share started at: %Y-%m-%d %H:%M:%S")
-clamscan -i -r -l /var/log/clamav/clamscan.log "${scanlocation}"
-finished=$(date "+ClamAV Scan finished at: %Y-%m-%d %H:%M:%S")
+# The location of the cland.conf file
+CLAMD_CONF="/etc/clamav/clamd.conf"
 
-# Set email headers
+# A list of directories to exclude from the scan.  This is only used by
+# clamscan.  Note that this can be a regex expression.  For clamdscan, 
+# edit the system config file and modify the ExcludePath variable. 
+EXCLUDED_DIRS="--exclude-dir=/sys/ --exclude-dir=/proc/ --exclude-dir=/dev/ --exclude-dir=/netshare/ --exclude-dir=/ISO/ --exclude-dir=/media/"
+
+# Either the clamscan or clamdscan command can be used.  Clamd uses multithreads and
+# is preferred, and significantly faster on a multithreaded capable machine.  Change the 
+# SCAND to 0 if you want to use clamscan.
+SCAND=0
+
+# The location of the tempory file created to store results that are emailed.
+EMAIL_FILE="/tmp/clamd_email_results.tmp"
+
+# The location of the scan log file.  This must be writable by the clamav process account
+CLAMAV_LOG="/tmp/clamscan-$(date +'%Y-%m-%d-%H%M').log"
+
+# The day of the week to do a weekly scan (Mon=1, Sun=7)
+WEEKLY_SCAN_DOW=6
+
+##----------------------------------- ##
+## Do not change anyting below here   ##
+##----------------------------------- ##
+#TODAY=$(date +'%c')
+HOST="$(hostname --fqdn)"
+ERROR_FLAG=0
+
+# Make sure we can write to the temporary files.
+if ! touch $CLAMAV_LOG; then exit $?; fi
+if ! touch $EMAIL_FILE; then exit $?; fi
+
+# Set the subject of the email appropriately
+if [ "$(date +'%u')" -eq $WEEKLY_SCAN_DOW ]; then
+    EMAIL_SUBJECT="Weekly ClamAV Scan on ${HOST} started at: $(date +'%Y-%m-%d %H:%M:%S')"
+else
+    EMAIL_SUBJECT="Daily ClamAV Scan on ${HOST} started at: $(date +'%Y-%m-%d %H:%M:%S')"
+fi
+
+# Choose the command to use and its options..  
+if [ $SCAND -eq 1 ]; then
+    SCAN_COMMAND="clamdscan --quiet --multiscan --fdpass"
+else
+    SCAN_COMMAND="clamscan --recursive --allmatch --suppress-ok-results --infected ${EXCLUDED_DIRS} --quiet"
+fi
+
+# Remove any previous temporary files.
+[ -f "$EMAIL_FILE" ] && rm $EMAIL_FILE
+
+# Create the email message header.  
 (
-    echo "To: ${to_email}"
-    echo "Subject: ${started}"
-    echo "MIME-Version: 1.0"
-    echo "Content-Type: text/html"
-    echo -e "\\r\\n"
-) >/tmp/clamavemail.tmp
+    echo "To: ${TO_EMAIL}"
+    echo "Subject: ${EMAIL_SUBJECT}"
+    echo ""
+    echo "Run Summary "
+    echo " Date: ${TODAY}"
+    echo " Command: ${SCAN_COMMAND}"
+) >> ${EMAIL_FILE}
 
-# Set email body
-(
-    echo "<pre style=\"font-size:14px\">"
-    echo "${started}"
-    echo ""
-    echo "${finished}"
-    echo ""
-    echo "--------------------------------------"
-    echo "ClamAV Scan Summary"
-    echo "--------------------------------------"
-    tail -n 8 /var/log/clamav/clamscan.log
-    echo ""
-    echo ""
-    echo "--------------------------------------"
-    echo "freshclam log file"
-    echo "--------------------------------------"
-    tail -n +2 /var/log/clamav/freshclam.log
-    echo ""
-    echo ""
-    echo "--------------------------------------"
-    echo "clamav log file"
-    echo "--------------------------------------"
-    tail -n +4 /var/log/clamav/clamscan.log | sed -e :a -e '$d;N;2,10ba' -e 'P;D'
-    echo "</pre>"
-) >> /tmp/clamavemail.tmp
+# Check for required software.
+if ! type ssmtp >/dev/null 2>&1; then
+    echo "Required ssmtp not installed. Aborting." >> ${EMAIL_FILE}
+    ERROR_FLAG=1
+elif ! type clamdscan >/dev/null 2>&1; then
+    echo "Require clamdscan it's not installed. Aborting." >> ${EMAIL_FILE}
+    ERROR_FLAG=1
+fi
 
-# Tidy Up
-rm /var/log/clamav/freshclam.log
-rm /var/log/clamav/clamscan.log
+# Verify the scan location.
+if [ "$(date +'%u')" -eq $WEEKLY_SCAN_DOW ]; then
+    if [ ! -d "$WEEKLY_DIR_TO_SCAN" ]; then
+        echo "$WEEKLY_DIR_TO_SCAN does not exist. No scan performed." >> ${EMAIL_FILE}
+        ERROR_FLAG=1
+    else
+        SIZE_OF_WEEKLY_DIR_TO_SCAN=$(du -shc $WEEKLY_DIR_TO_SCAN 2> /dev/null | cut -f1 | tail -1)
+        echo " Directory Scanned: ${WEEKLY_DIR_TO_SCAN}" >> ${EMAIL_FILE}
+        echo " Amount of data scanned: ${SIZE_OF_WEEKLY_DIR_TO_SCAN}" >> ${EMAIL_FILE}
+    fi
+else
+    if [ ! -d "$DAILY_DIR_TO_SCAN" ]; then
+        echo "$DAILY_DIR_TO_SCAN does not exist. No scan performed." >> ${EMAIL_FILE}
+        ERROR_FLAG=1
+    else
+        SIZE_OF_DAILY_DIR_TO_SCAN=$(du -shc $DAILY_DIR_TO_SCAN 2> /dev/null | cut -f1 | tail -1)
+        echo " Directory Scanned: ${DAILY_DIR_TO_SCAN}" >> ${EMAIL_FILE}
+        echo " Amount of data scanned: ${SIZE_OF_DAILY_DIR_TO_SCAN}" >> ${EMAIL_FILE}
+    fi
+fi
+
+# Run the anti-virus scan & process the results
+if [ $ERROR_FLAG -eq 0 ]; then
+    if [ "$(date +'%u')" -eq $WEEKLY_SCAN_DOW ]; then
+        $SCAN_COMMAND --log=${CLAMAV_LOG} ${WEEKLY_DIR_TO_SCAN}
+        scan_status=$?
+    else
+        $SCAN_COMMAND --log=${CLAMAV_LOG} ${DAILY_DIR_TO_SCAN}
+        scan_status=$?
+    fi
+    scan_status=$?
+
+    # Get the directories excluded in the scan when using clamdscan.
+    echo " Excluded directories:" >> ${EMAIL_FILE}
+    if [ $SCAND -eq 1 ]; then
+        cat $CLAMD_CONF | grep 'ExcludePath' | sed 's/ExcludePath ^//' | awk '{print "   - " $0}' >> ${EMAIL_FILE}
+    fi
+
+    # Use the command status code to identify if any viruses were found.
+    if [ $scan_status -eq 0 ]; then
+        echo " Virus(es) Found: 0" >> ${EMAIL_FILE}
+    elif [ $scan_status -eq 1 ]; then
+        NUM_VIRUSES_FOUND=$(cat "${CLAMAV_LOG}" | grep "Infected files" | awk '{print $3}')
+        echo " Virus(es) found: ${NUM_VIRUSES_FOUND}" >> ${EMAIL_FILE}
+    elif [ $scan_status -eq 2 ]; then
+        echo "Error code 2." >> ${EMAIL_FILE}
+    else
+        echo "Unknown effort: $scan_status" >> ${EMAIL_FILE}
+    fi
+
+    # Search for any errors, warnings or bad behavior. Seperate by official vs unofficial
+    # signatures.
+    RUN_TIME=$(cat "${CLAMAV_LOG}" | grep 'Time:')
+    WARNINGS=$(cat "${CLAMAV_LOG}" | grep 'WARNING' | wc -l)
+    ERRORS=$(cat "${CLAMAV_LOG}" | grep 'ERROR' | wc -l)
+    INFECTED_COUNT=$(cat "${CLAMAV_LOG}" | grep 'FOUND' | wc -l)
+    UNOFFICIAL=$(cat "${CLAMAV_LOG}" | grep 'UNOFFICIAL FOUND' | wc -l)
+    OFFICIAL="$(($INFECTED_COUNT-$UNOFFICIAL))"
+
+    echo " ${RUN_TIME}" >> ${EMAIL_FILE}
+    if [ ! $ERRORS -eq 0 ]; then
+        echo " Errors: ${ERRORS}" >> ${EMAIL_FILE}
+    else
+        echo " Errors: 0" >> ${EMAIL_FILE}
+
+    fi
+
+    if [ ! $WARNINGS -eq 0 ]; then
+        echo " Warnings: ${WARNINGS}" >> ${EMAIL_FILE}
+    else
+        echo " Warnings: 0" >> ${EMAIL_FILE}
+    fi
+
+    if [ ! $INFECTED_COUNT -eq 0 ]; then
+        (
+            echo " Infected files: ${INFECTED_COUNT}"
+            echo " Official signatures found: ${OFFICIAL}"
+            echo " Unofficial signatures found: ${UNOFFICIAL}"
+        ) >> ${EMAIL_FILE}
+
+        if [ $OFFICIAL -gt 0 ]; then
+            (
+                echo "  --------------------"
+                echo "  Official Found Files"
+                echo "  --------------------"
+                echo "$(cat $CLAMAV_LOG | grep 'FOUND' | grep -v 'UNOFFICIAL FOUND' | sed 's/FOUND//' | awk '{print "   - " $0}')"
+                echo " "
+            ) >> ${EMAIL_FILE}
+        fi
+
+        if [ $UNOFFICIAL -gt 0 ]; then
+            (
+                echo "  ---------------------"
+                echo "  Unofficial Found Files"
+                echo "  ---------------------"
+                echo "$(cat $CLAMAV_LOG | grep 'UNOFFICIAL FOUND' | sed s/FOUND// | awk '{print "   - " $0}')"
+                echo " "
+            ) >> ${EMAIL_FILE}
+        fi
+    fi
+
+    if [ $ERRORS -gt 0 ]; then
+        (
+            echo "  ---------------------------------"
+            echo "  Error Descriptions (de-dplicated)"
+            echo "  ---------------------------------"
+            echo "$(cat $CLAMAV_LOG | grep 'ERROR' | sed s/ERROR// | uniq | awk '{print "   - " $0}')"
+            echo " "
+        ) >> ${EMAIL_FILE}
+    fi
+
+    if [ $ERRORS -gt 0 ]; then
+        (
+            echo "  ---------------------------------"
+            echo "  Warning Descriptions (de-dplicated)"
+            echo "  ---------------------------------"
+            echo "$(cat $CLAMAV_LOG | grep 'WARNING' | sed s/WARNING// | uniq | awk '{print "   - " $0}')"
+            echo " "
+        ) >> ${EMAIL_FILE}
+    fi
+
+    if [ ! $scan_status -eq 0 ]; then    
+        (
+            echo " "
+            echo "--------------------------------------"
+            echo "clamav log file"
+            cat "${CLAMAV_LOG}"
+        ) >> ${EMAIL_FILE}
+    fi
+fi
+
+# email the results.
+ssmtp ${TO_EMAIL} < $EMAIL_FILE
