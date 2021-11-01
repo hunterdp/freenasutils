@@ -18,10 +18,10 @@
 ## Modify these to fit your use case. ##
 ##----------------------------------- ##
 # The email receipient
-TO_EMAIL="hunterdp.hpe@gmail.com"
+TO_EMAIL="foo@gmail.com"
 
 # The top level directories to scan.  The scan will travese the directory
-DAILY_DIR_TO_SCAN="/home/dph/Downloads"
+DAILY_DIR_TO_SCAN="/home/"
 WEEKLY_DIR_TO_SCAN="/"
 
 # The location of the cland.conf file
